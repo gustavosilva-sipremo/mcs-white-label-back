@@ -22,3 +22,15 @@ class UserCreate(BaseModel):
     assignments: List[Assignment] = Field(default_factory=list)
     teams: List[str] = Field(default_factory=list)
     terms: List[Terms] = Field(default_factory=list)
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    type: Optional[str] = None
+    assignments: Optional[List[Assignment]] = None
+    teams: Optional[List[str]] = None
+    terms: Optional[List[Terms]] = None
+    active: Optional[bool] = None

@@ -2,8 +2,13 @@ from fastapi import APIRouter, HTTPException
 from app.services.user_service import list_users
 from app.database.client import identity_db
 
-from app.models.user import UserCreate
+from app.models.user import UserCreate, UserUpdate
 from app.services.user_service import create_user
+from app.services.user_service import (
+    get_user_by_id,
+    update_user,
+    delete_user,
+)
 
 router = APIRouter()
 
@@ -41,3 +46,51 @@ async def create_user_route(tenant_database: str, user: UserCreate):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{tenant_database}/users/{user_id}")
+async def get_user_route(tenant_database: str, user_id: str):
+
+    try:
+        user = get_user_by_id(tenant_database, user_id)
+        return user
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.put("/{tenant_database}/users/{user_id}")
+async def update_user_route(tenant_database: str, user_id: str, user: UserUpdate):
+
+    try:
+        updated_user = update_user(
+            tenant_database, user_id, user.dict(exclude_unset=True)
+        )
+
+        return updated_user
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/{tenant_database}/users/{user_id}")
+async def delete_user_route(tenant_database: str, user_id: str):
+
+    try:
+        return delete_user(tenant_database, user_id)
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.patch("/{tenant_database}/users/{user_id}")
+async def patch_user_route(tenant_database: str, user_id: str, user: UserUpdate):
+    try:
+        updated_user = update_user(
+            tenant_database, user_id, user.dict(exclude_unset=True)
+        )
+
+        return updated_user
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
