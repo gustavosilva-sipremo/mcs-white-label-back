@@ -1,96 +1,77 @@
 from fastapi import APIRouter, HTTPException
-from app.services.user_service import list_users
-from app.database.client import identity_db
 
-from app.models.user import UserCreate, UserUpdate
-from app.services.user_service import create_user
-from app.services.user_service import (
-    get_user_by_id,
-    update_user,
-    delete_user,
+from app.services.tenant_service import (
+    list_tenants,
+    create_tenant,
+    get_tenant_by_id,
+    update_tenant,
+    delete_tenant,
 )
 
-router = APIRouter()
+router = APIRouter(prefix="/tenants", tags=["Tenants"])
 
 
-# Listar todos os tenants
-@router.get("/all")
+# =========================
+# List Tenants
+# =========================
+@router.get("")
 async def get_all_tenants():
-    tenants = list(identity_db.tenants.find({}))
-    for tenant in tenants:
-        tenant["_id"] = str(tenant["_id"])
-    return {"tenants": tenants}
-
-
-# Listar todos os usuários de um tenant
-@router.get("/{tenant_database}/users")
-async def get_users_by_tenant(tenant_database: str):
     try:
-        users = list_users(tenant_database)
-        return {"tenant": tenant_database, "users": users}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        tenants = list_tenants()
+        return {"tenants": tenants}
+
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{tenant_database}/users")
-async def create_user_route(tenant_database: str, user: UserCreate):
+# =========================
+# Create Tenant
+# =========================
+@router.post("")
+async def create_tenant_route(tenant: dict):
 
     try:
-        new_user = create_user(tenant_database, user.dict())
-        return {"message": "User created successfully", "user": new_user}
+        new_tenant = create_tenant(tenant)
+        return {"message": "Tenant created successfully", "tenant": new_tenant}
 
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/{tenant_database}/users/{user_id}")
-async def get_user_route(tenant_database: str, user_id: str):
-
-    try:
-        user = get_user_by_id(tenant_database, user_id)
-        return user
-
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-@router.put("/{tenant_database}/users/{user_id}")
-async def update_user_route(tenant_database: str, user_id: str, user: UserUpdate):
+# =========================
+# Get Tenant
+# =========================
+@router.get("/{tenant_id}")
+async def get_tenant_route(tenant_id: str):
 
     try:
-        updated_user = update_user(
-            tenant_database, user_id, user.dict(exclude_unset=True)
-        )
-
-        return updated_user
+        return get_tenant_by_id(tenant_id)
 
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.delete("/{tenant_database}/users/{user_id}")
-async def delete_user_route(tenant_database: str, user_id: str):
+# =========================
+# Update Tenant
+# =========================
+@router.patch("/{tenant_id}")
+async def update_tenant_route(tenant_id: str, tenant: dict):
 
     try:
-        return delete_user(tenant_database, user_id)
+        return update_tenant(tenant_id, tenant)
 
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.patch("/{tenant_database}/users/{user_id}")
-async def patch_user_route(tenant_database: str, user_id: str, user: UserUpdate):
-    try:
-        updated_user = update_user(
-            tenant_database, user_id, user.dict(exclude_unset=True)
-        )
+# =========================
+# Delete Tenant
+# =========================
+@router.delete("/{tenant_id}")
+async def delete_tenant_route(tenant_id: str):
 
-        return updated_user
+    try:
+        return delete_tenant(tenant_id)
 
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
