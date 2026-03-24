@@ -1,6 +1,5 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
-from uuid import UUID
 
 
 class Assignment(BaseModel):
@@ -13,15 +12,13 @@ class Terms(BaseModel):
     value: bool
 
 
-class User(BaseModel):
-    id: Optional[str]
-    tenant_id: str
+class UserCreate(BaseModel):
     name: str
     username: str
+    password: str
     email: EmailStr
-    phone: Optional[str]
+    phone: Optional[str] = None
     type: str
-    assignments: List[Assignment] = []
-    teams: List[str] = []
-    active: bool
-    terms: List[Terms] = []
+    assignments: List[Assignment] = Field(default_factory=list)
+    teams: List[str] = Field(default_factory=list)
+    terms: List[Terms] = Field(default_factory=list)
