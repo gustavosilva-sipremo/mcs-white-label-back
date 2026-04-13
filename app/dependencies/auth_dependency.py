@@ -6,7 +6,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 
 from app.config import JWT_SECRET, JWT_ALGORITHM
-from app.database.client import get_tenant_db
+from app.database.client import get_tenant_db, identity_db
 
 
 # =========================
@@ -104,6 +104,20 @@ def get_current_user(
 
     # remover dados sensíveis
     user.pop("password_hash", None)
+
+    # branding / white-label: caminho do JSON em public/ (ex.: /documents/identities/id-sipremo.json)
+    tenant = identity_db.tenants.find_one(
+        {"database": tenant_db},
+        {"identity_settings": 1, "name": 1},
+    )
+    if tenant:
+        user["identity_settings"] = tenant.get("identity_settings")
+        user["tenant_name"] = tenant.get("name")
+    else:
+        user["identity_settings"] = None
+        user["tenant_name"] = None
+
+    user["tenant_database"] = tenant_db
 
     return user
 

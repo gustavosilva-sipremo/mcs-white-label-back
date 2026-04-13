@@ -42,7 +42,7 @@ def list_active_tenants_for_login():
 
     cursor = identity_db.tenants.find(
         {"active": True},
-        {"name": 1, "database": 1},
+        {"name": 1, "database": 1, "identity_settings": 1},
         sort=[("name", 1)],
     )
     out = []
@@ -55,6 +55,7 @@ def list_active_tenants_for_login():
                 "id": str(doc["_id"]),
                 "name": doc.get("name") or db_name,
                 "database": db_name,
+                "identity_settings": doc.get("identity_settings"),
             }
         )
     return out
