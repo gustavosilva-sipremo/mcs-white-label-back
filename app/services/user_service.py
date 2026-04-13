@@ -57,7 +57,6 @@ def create_user(tenant_database: str, user_data: dict):
         "phone": user_data.get("phone"),
         "type": user_data["type"],
         "assignments": user_data.get("assignments", []),
-        "teams": user_data.get("teams", []),
         "active": True,
         "terms": user_data.get("terms", []),
         "created_at": datetime.utcnow(),
