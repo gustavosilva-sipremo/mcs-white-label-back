@@ -1,16 +1,17 @@
 import bcrypt
-import secrets
-import hashlib
 from datetime import datetime, timedelta
-from jose import jwt
+from jose import jwt, JWTError
 
-from app.database.client import get_tenant_db, identity_db
+from app.database.client import get_tenant_db
 from app.config import (
     JWT_SECRET,
+    REFRESH_JWT_SECRET,
     JWT_ALGORITHM,
     ACCESS_TOKEN_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS,
 )
+
+REFRESH_TOKEN_TYP = "refresh"
 
 
 # =========================
@@ -32,18 +33,41 @@ def create_access_token(user_id: str, tenant_db: str):
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def generate_refresh_token():
+def create_refresh_token(user_id: str, tenant_db: str):
     """
-    Gera refresh token seguro
+    Gera JWT de refresh (stateless, sem persistência em banco).
     """
-    return secrets.token_urlsafe(48)
+
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+    payload = {
+        "sub": str(user_id),
+        "tenant_db": tenant_db,
+        "typ": REFRESH_TOKEN_TYP,
+        "exp": expire,
+    }
+
+    return jwt.encode(payload, REFRESH_JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def hash_refresh_token(token: str):
+def decode_refresh_token_payload(refresh_token: str) -> dict:
     """
-    Hash SHA256 para refresh token
+    Valida assinatura e exp do refresh JWT.
     """
-    return hashlib.sha256(token.encode()).hexdigest()
+
+    try:
+        payload = jwt.decode(
+            refresh_token,
+            REFRESH_JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+        )
+    except JWTError:
+        raise ValueError("Invalid refresh token")
+
+    if payload.get("typ") != REFRESH_TOKEN_TYP:
+        raise ValueError("Invalid refresh token")
+
+    return payload
 
 
 # =========================
@@ -85,28 +109,8 @@ def login_user(data: dict):
     if not bcrypt.checkpw(password.encode(), password_hash):
         raise ValueError("Invalid credentials")
 
-    # =========================
-    # gerar tokens
-    # =========================
-
     access_token = create_access_token(user["_id"], tenant_db)
-
-    refresh_token = generate_refresh_token()
-    refresh_hash = hash_refresh_token(refresh_token)
-
-    now = datetime.utcnow()
-    expires_at = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-
-    identity_db.login_tokens.insert_one(
-        {
-            "user_id": user["_id"],
-            "tenant_db": tenant_db,
-            "refresh_token_hash": refresh_hash,
-            "created_at": now,
-            "expires_at": expires_at,
-            "revoked": False,
-        }
-    )
+    refresh_token = create_refresh_token(user["_id"], tenant_db)
 
     return {
         "access_token": access_token,
@@ -124,46 +128,20 @@ def refresh_access_token(refresh_token: str):
     if not refresh_token:
         raise ValueError("Missing refresh token")
 
-    incoming_hash = hash_refresh_token(refresh_token)
+    payload = decode_refresh_token_payload(refresh_token)
 
-    token_doc = identity_db.login_tokens.find_one(
-        {
-            "refresh_token_hash": incoming_hash,
-            "revoked": False,
-        }
-    )
+    user_id = payload.get("sub")
+    tenant_db = payload.get("tenant_db")
 
-    if not token_doc:
+    if not user_id or not tenant_db:
         raise ValueError("Invalid refresh token")
 
-    if token_doc["expires_at"] < datetime.utcnow():
-        raise ValueError("Refresh token expired")
+    access_token = create_access_token(user_id, tenant_db)
 
-    # =========================
-    # ROTATE REFRESH TOKEN
-    # =========================
-
-    new_refresh_token = generate_refresh_token()
-    new_hash = hash_refresh_token(new_refresh_token)
-
-    identity_db.login_tokens.update_one(
-        {"_id": token_doc["_id"]},
-        {
-            "$set": {
-                "refresh_token_hash": new_hash,
-                "updated_at": datetime.utcnow(),
-            }
-        },
-    )
-
-    access_token = create_access_token(
-        token_doc["user_id"],
-        token_doc["tenant_db"],
-    )
-
+    # Sem rotação: o mesmo refresh JWT permanece válido até expirar.
     return {
         "access_token": access_token,
-        "refresh_token": new_refresh_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
         "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     }
@@ -172,27 +150,9 @@ def refresh_access_token(refresh_token: str):
 # =========================
 # Logout
 # =========================
-def logout_user(refresh_token: str):
-
-    if not refresh_token:
-        raise ValueError("Missing refresh token")
-
-    token_hash = hash_refresh_token(refresh_token)
-
-    result = identity_db.login_tokens.update_one(
-        {
-            "refresh_token_hash": token_hash,
-            "revoked": False,
-        },
-        {
-            "$set": {
-                "revoked": True,
-                "revoked_at": datetime.utcnow(),
-            }
-        },
-    )
-
-    if result.matched_count == 0:
-        raise ValueError("Invalid refresh token")
+def logout_user(_refresh_token: str | None = None):
+    """
+    Stateless: não há revogação no servidor. O cliente descarta os tokens.
+    """
 
     return {"message": "Logged out successfully"}
