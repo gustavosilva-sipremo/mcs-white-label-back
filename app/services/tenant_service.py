@@ -32,6 +32,35 @@ def list_tenants():
 
 
 # =========================
+# List tenants for login (public, minimal fields)
+# =========================
+def list_active_tenants_for_login():
+    """
+    Retorna apenas tenants ativos com nome e database Mongo
+    (o mesmo valor usado em POST /auth/login como tenant_db).
+    """
+
+    cursor = identity_db.tenants.find(
+        {"active": True},
+        {"name": 1, "database": 1},
+        sort=[("name", 1)],
+    )
+    out = []
+    for doc in cursor:
+        db_name = doc.get("database")
+        if not db_name:
+            continue
+        out.append(
+            {
+                "id": str(doc["_id"]),
+                "name": doc.get("name") or db_name,
+                "database": db_name,
+            }
+        )
+    return out
+
+
+# =========================
 # Create Tenant
 # =========================
 def create_tenant(tenant_data: dict):

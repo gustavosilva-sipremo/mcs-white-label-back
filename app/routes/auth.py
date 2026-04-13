@@ -8,6 +8,7 @@ from app.services.auth_service import (
     refresh_access_token,
     logout_user,
 )
+from app.services.tenant_service import list_active_tenants_for_login
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -34,6 +35,22 @@ class TokenResponse(BaseModel):
     refresh_token: str | None = None
     token_type: str
     expires_in: int
+
+
+# =========================
+# Tenants for login (public)
+# =========================
+@router.get("/login-tenants")
+async def login_tenants():
+    """
+    Lista empresas ativas para seleção na tela de login.
+    Não requer autenticação.
+    """
+
+    try:
+        return {"tenants": list_active_tenants_for_login()}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # =========================
