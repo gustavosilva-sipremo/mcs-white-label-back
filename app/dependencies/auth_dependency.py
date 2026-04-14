@@ -142,3 +142,24 @@ def get_admin_user(
         )
 
     return current_user
+
+
+# =========================
+# Admin + tenant path guard
+# =========================
+def require_admin_same_tenant(
+    tenant_database: str,
+    admin_user: dict = Depends(get_admin_user),
+):
+    """
+    Garante que o tenant da URL é o mesmo do JWT (usuário admin do tenant).
+    Impede que um admin liste ou altere usuários de outro tenant.
+    """
+
+    if tenant_database != admin_user.get("tenant_database"):
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant access denied",
+        )
+
+    return admin_user

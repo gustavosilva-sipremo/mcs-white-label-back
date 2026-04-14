@@ -16,8 +16,12 @@ def validate_object_id(user_id: str):
 
 
 def serialize_user(user):
-    user["_id"] = str(user["_id"])
-    return user
+    if not user:
+        return user
+    out = dict(user)
+    out["_id"] = str(out["_id"])
+    out.pop("password_hash", None)
+    return out
 
 
 # =========================
@@ -66,6 +70,7 @@ def create_user(tenant_database: str, user_data: dict):
     result = db.users.insert_one(user_document)
 
     user_document["_id"] = str(result.inserted_id)
+    user_document.pop("password_hash", None)
 
     return user_document
 
