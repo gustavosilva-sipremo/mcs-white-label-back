@@ -1,6 +1,8 @@
 import bcrypt
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
+from bson import ObjectId
+from bson.errors import InvalidId
 
 from app.database.client import get_tenant_db
 from app.config import (
@@ -156,3 +158,76 @@ def logout_user(_refresh_token: str | None = None):
     """
 
     return {"message": "Logged out successfully"}
+
+
+def normalize_term_key(value: str) -> str:
+    normalized = value.strip().lower()
+    normalized = normalized.replace(" ", "")
+    if normalized.startswith("termos"):
+        normalized = normalized[len("termos") :]
+    if normalized.startswith("termo"):
+        normalized = normalized[len("termo") :]
+    return normalized
+
+
+def update_logged_user_terms(
+    tenant_db: str,
+    user_id: str,
+    terms: list[dict],
+    required_term_names: list[str] | None = None,
+):
+    if not tenant_db or not user_id:
+        raise ValueError("Invalid authenticated user")
+
+    if not isinstance(terms, list) or len(terms) == 0:
+        raise ValueError("Terms payload is required")
+
+    normalized_terms = []
+    accepted_map: dict[str, bool] = {}
+
+    for item in terms:
+        name = item.get("name") if isinstance(item, dict) else None
+        value = item.get("value") if isinstance(item, dict) else None
+
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Each term must include a valid name")
+        if not isinstance(value, bool):
+            raise ValueError("Each term must include a boolean value")
+
+        normalized_terms.append({"name": name.strip(), "value": value})
+        accepted_map[normalize_term_key(name)] = value
+
+    required_term_names = required_term_names or []
+    for required_name in required_term_names:
+        key = normalize_term_key(required_name)
+        if not key:
+            continue
+        if accepted_map.get(key) is not True:
+            raise ValueError(f"Required term '{required_name}' must be accepted")
+
+    try:
+        obj_user_id = ObjectId(user_id)
+    except InvalidId:
+        raise ValueError("Invalid user id")
+
+    db = get_tenant_db(tenant_db)
+    result = db.users.update_one(
+        {"_id": obj_user_id},
+        {
+            "$set": {
+                "terms": normalized_terms,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    if result.matched_count == 0:
+        raise ValueError("User not found")
+
+    user = db.users.find_one({"_id": obj_user_id})
+    if not user:
+        raise ValueError("User not found")
+
+    user["_id"] = str(user["_id"])
+    user.pop("password_hash", None)
+    return user

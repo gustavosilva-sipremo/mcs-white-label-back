@@ -7,6 +7,7 @@ from app.services.auth_service import (
     login_user,
     refresh_access_token,
     logout_user,
+    update_logged_user_terms,
 )
 from app.services.tenant_service import (
     list_active_tenants_for_login,
@@ -38,6 +39,16 @@ class TokenResponse(BaseModel):
     refresh_token: str | None = None
     token_type: str
     expires_in: int
+
+
+class TermItem(BaseModel):
+    name: str
+    value: bool
+
+
+class UpdateTermsRequest(BaseModel):
+    terms: list[TermItem]
+    required_term_names: list[str] = Field(default_factory=list)
 
 
 # =========================
@@ -133,6 +144,29 @@ async def logout(data: LogoutRequest):
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/terms")
+async def update_my_terms(
+    data: UpdateTermsRequest,
+    current_user=Depends(get_current_user),
+):
+    """
+    Atualiza os termos do usuário autenticado.
+    Valida apenas os termos obrigatórios informados em required_term_names.
+    """
+    try:
+        user = update_logged_user_terms(
+            tenant_db=current_user.get("tenant_database"),
+            user_id=current_user.get("_id"),
+            terms=[term.model_dump() for term in data.terms],
+            required_term_names=data.required_term_names,
+        )
+        return {"message": "Terms updated successfully", "user": user}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
