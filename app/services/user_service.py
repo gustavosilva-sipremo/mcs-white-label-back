@@ -43,9 +43,17 @@ def create_user(tenant_database: str, user_data: dict):
 
     db = get_tenant_db(tenant_database)
 
-    # 🔒 validar username único
-    if db.users.find_one({"username": user_data["username"]}):
-        raise ValueError("Username already exists")
+    user_type = str(user_data.get("type", "")).strip()
+    raw_username = (user_data.get("username") or "").strip()
+
+    if user_type == "external":
+        username_value = None
+    else:
+        if not raw_username:
+            raise ValueError("Username is required for this account type")
+        username_value = raw_username
+        if db.users.find_one({"username": username_value}):
+            raise ValueError("Username already exists")
 
     # hash da senha
     password_hash = bcrypt.hashpw(
@@ -55,17 +63,17 @@ def create_user(tenant_database: str, user_data: dict):
     user_document = {
         "tenant_id": tenant_database,
         "name": user_data["name"],
-        "username": user_data["username"],
         "password_hash": password_hash,
         "email": user_data["email"],
         "phone": user_data.get("phone"),
-        "type": user_data["type"],
+        "type": user_type,
         "assignments": user_data.get("assignments", []),
         "active": True,
         "terms": user_data.get("terms", []),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
+    user_document["username"] = username_value
 
     result = db.users.insert_one(user_document)
 
@@ -110,11 +118,17 @@ def update_user(tenant_database: str, user_id: str, user_data: dict):
 
     # 🔒 validar username único (se estiver sendo atualizado)
     if "username" in user_data:
-        existing = db.users.find_one(
-            {"username": user_data["username"], "_id": {"$ne": obj_id}}
-        )
-        if existing:
-            raise ValueError("Username already exists")
+        un = user_data.get("username")
+        if un is not None and str(un).strip():
+            un = str(un).strip()
+            user_data["username"] = un
+            existing = db.users.find_one(
+                {"username": un, "_id": {"$ne": obj_id}}
+            )
+            if existing:
+                raise ValueError("Username already exists")
+        else:
+            user_data["username"] = None
 
     user_data["updated_at"] = datetime.utcnow()
 

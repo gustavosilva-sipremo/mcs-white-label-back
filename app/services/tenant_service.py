@@ -17,6 +17,37 @@ DEFAULT_TENANT_FEATURES = {
 }
 
 
+def normalize_assignment_fields(raw) -> list:
+    """
+    Valida e normaliza a configuração de campos de atribuição do tenant.
+    Cada item: { "label": str, "value": str, "type": "text" }.
+    Por enquanto apenas type=text é aceito.
+    """
+
+    if not raw or not isinstance(raw, list):
+        return []
+
+    out = []
+    seen_values = set()
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label", "")).strip()
+        value = str(item.get("value", "")).strip()
+        ftype = str(item.get("type", "text")).strip().lower()
+        if not label or not value:
+            continue
+        if ftype != "text":
+            continue
+        if value in seen_values:
+            continue
+        seen_values.add(value)
+        out.append({"label": label, "value": value, "type": "text"})
+
+    return out
+
+
 def normalize_tenant_features(raw) -> dict:
     """
     Normaliza o objeto features do Mongo para um dict com todas as chaves booleanas.
@@ -153,6 +184,10 @@ def create_tenant(tenant_data: dict):
         tenant_document["identity_settings"] = str(tenant_data["identity_settings"]).strip()
     if tenant_data.get("features") is not None:
         tenant_document["features"] = tenant_data["features"]
+    if tenant_data.get("assignments") is not None:
+        tenant_document["assignments"] = normalize_assignment_fields(
+            tenant_data.get("assignments")
+        )
 
     result = identity_db.tenants.insert_one(tenant_document)
 
@@ -190,6 +225,11 @@ def update_tenant(tenant_id: str, tenant_data: dict):
 
     if not tenant_data:
         raise ValueError("No fields provided for update")
+
+    if "assignments" in tenant_data:
+        tenant_data["assignments"] = normalize_assignment_fields(
+            tenant_data.get("assignments")
+        )
 
     if "slug" in tenant_data and tenant_data["slug"] is not None:
         slug = str(tenant_data["slug"]).strip()

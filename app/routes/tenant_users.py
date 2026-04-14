@@ -34,7 +34,7 @@ async def create_user_route(
 ):
 
     try:
-        new_user = create_user(tenant_database, user.model_dump())
+        new_user = create_user(tenant_database, user.model_dump(exclude_none=True))
         return {"message": "User created successfully", "user": new_user}
 
     except ValueError as e:

@@ -14,7 +14,7 @@ class Terms(BaseModel):
 
 class UserCreate(BaseModel):
     name: str
-    username: str
+    username: Optional[str] = None
     password: str
     email: EmailStr
     phone: Optional[str] = None

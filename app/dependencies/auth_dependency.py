@@ -109,16 +109,18 @@ def get_current_user(
     # branding / white-label: caminho do JSON em public/ (ex.: /documents/identities/id-sipremo.json)
     tenant = identity_db.tenants.find_one(
         {"database": tenant_db},
-        {"identity_settings": 1, "name": 1, "features": 1},
+        {"identity_settings": 1, "name": 1, "features": 1, "assignments": 1},
     )
     if tenant:
         user["identity_settings"] = tenant.get("identity_settings")
         user["tenant_name"] = tenant.get("name")
         user["features"] = normalize_tenant_features(tenant.get("features"))
+        user["assignment_fields"] = tenant.get("assignments") or []
     else:
         user["identity_settings"] = None
         user["tenant_name"] = None
         user["features"] = normalize_tenant_features(None)
+        user["assignment_fields"] = []
 
     user["tenant_database"] = tenant_db
 
