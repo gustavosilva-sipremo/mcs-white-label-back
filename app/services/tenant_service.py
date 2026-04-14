@@ -6,6 +6,61 @@ from app.database.client import identity_db
 
 
 # =========================
+# Feature flags (identity.tenants.features)
+# =========================
+DEFAULT_TENANT_FEATURES = {
+    "map": False,
+    "mobile": False,
+    "public_map": False,
+    "sipremo_tools": False,
+    "public_trigger": False,
+}
+
+
+def normalize_tenant_features(raw) -> dict:
+    """
+    Normaliza o objeto features do Mongo para um dict com todas as chaves booleanas.
+    """
+
+    out = dict(DEFAULT_TENANT_FEATURES)
+    if not raw or not isinstance(raw, dict):
+        return out
+    for key in DEFAULT_TENANT_FEATURES:
+        out[key] = bool(raw.get(key))
+    return out
+
+
+def resolve_public_tenant_features(host: str | None, tenant_db: str | None) -> dict:
+    """
+    Resolve features para rotas públicas (sem JWT):
+    1) query tenant_db, se informado;
+    2) senão, match do Host (sem porta) em tenants.domains;
+    3) senão, todas as flags True (compat / dev sem domínio cadastrado).
+    """
+
+    tenant = None
+
+    if tenant_db and str(tenant_db).strip():
+        tenant = identity_db.tenants.find_one(
+            {"database": str(tenant_db).strip(), "active": True},
+            {"features": 1},
+        )
+
+    if not tenant and host:
+        hostname = str(host).split(":")[0].strip().lower()
+        if hostname:
+            tenant = identity_db.tenants.find_one(
+                {"active": True, "domains": hostname},
+                {"features": 1},
+            )
+
+    if not tenant:
+        return {k: True for k in DEFAULT_TENANT_FEATURES}
+
+    return normalize_tenant_features(tenant.get("features"))
+
+
+# =========================
 # Helpers
 # =========================
 def validate_object_id(tenant_id: str):

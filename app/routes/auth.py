@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel, Field
 
 from app.dependencies.auth_dependency import get_current_user, get_admin_user
@@ -8,7 +8,10 @@ from app.services.auth_service import (
     refresh_access_token,
     logout_user,
 )
-from app.services.tenant_service import list_active_tenants_for_login
+from app.services.tenant_service import (
+    list_active_tenants_for_login,
+    resolve_public_tenant_features,
+)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -49,6 +52,30 @@ async def login_tenants():
 
     try:
         return {"tenants": list_active_tenants_for_login()}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# =========================
+# Public tenant features (no auth)
+# =========================
+@router.get("/public-features")
+async def public_tenant_features(
+    request: Request,
+    tenant_db: str | None = Query(
+        None,
+        description="Opcional: database do tenant (ex.: dev quando Host não bate em domains).",
+    ),
+):
+    """
+    Features para gating de rotas públicas (/public-maps, /public-occurrence-trigger).
+    Resolve por tenant_db ou pelo header Host (domínios cadastrados no tenant).
+    """
+
+    try:
+        host = request.headers.get("host")
+        features = resolve_public_tenant_features(host, tenant_db)
+        return {"features": features}
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
