@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes import tenants, tenant_users, auth
+from app.routes import tenants, tenant_users, tenant_teams, auth
 
 # =========================
 # App
@@ -42,6 +42,12 @@ app.include_router(
     tenant_users.router,
     prefix="/tenants",
     tags=["Tenant Users"],
+)
+
+app.include_router(
+    tenant_teams.router,
+    prefix="/tenants",
+    tags=["Tenant Teams"],
 )
 
 app.include_router(
