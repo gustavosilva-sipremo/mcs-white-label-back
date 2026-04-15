@@ -102,7 +102,12 @@ def get_user_by_id(tenant_database: str, user_id: str):
 # =========================
 # Update User
 # =========================
-def update_user(tenant_database: str, user_id: str, user_data: dict):
+def update_user(
+    tenant_database: str,
+    user_id: str,
+    user_data: dict,
+    actor_user_id: str | None = None,
+):
 
     db = get_tenant_db(tenant_database)
     obj_id = validate_object_id(user_id)
@@ -115,6 +120,15 @@ def update_user(tenant_database: str, user_id: str, user_data: dict):
     # 🔒 impedir update vazio
     if not user_data:
         raise ValueError("No fields provided for update")
+
+    # 🔒 impedir auto-desativação do próprio usuário autenticado
+    if (
+        "active" in user_data
+        and user_data.get("active") is False
+        and actor_user_id
+        and str(actor_user_id) == str(user_id)
+    ):
+        raise ValueError("You cannot deactivate your own account")
 
     # 🔒 validar username único (se estiver sendo atualizado)
     if "username" in user_data:

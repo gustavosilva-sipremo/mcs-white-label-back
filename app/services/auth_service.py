@@ -90,15 +90,13 @@ def login_user(data: dict):
     except Exception:
         raise ValueError("Invalid tenant")
 
-    user = db.users.find_one(
-        {
-            "username": username,
-            "active": True,
-        }
-    )
+    user = db.users.find_one({"username": username})
 
     if not user:
         raise ValueError("Invalid credentials")
+
+    if user.get("active") is not True:
+        raise ValueError("User is inactive")
 
     password_hash = user.get("password_hash")
 

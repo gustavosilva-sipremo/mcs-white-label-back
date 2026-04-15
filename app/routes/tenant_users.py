@@ -60,16 +60,22 @@ async def patch_user_route(
     tenant_database: str,
     user_id: str,
     user: UserUpdate,
-    _admin=Depends(require_admin_same_tenant),
+    admin=Depends(require_admin_same_tenant),
 ):
 
     try:
         return update_user(
-            tenant_database, user_id, user.model_dump(exclude_unset=True)
+            tenant_database,
+            user_id,
+            user.model_dump(exclude_unset=True),
+            actor_user_id=admin.get("_id"),
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        detail = str(e)
+        if detail == "User not found":
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
 
 
 @router.delete("/{user_id}")
