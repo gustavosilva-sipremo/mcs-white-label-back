@@ -1,8 +1,11 @@
 from bson import ObjectId
 from bson.errors import InvalidId
 from datetime import datetime
+import bcrypt
+import re
+import unicodedata
 
-from app.database.client import identity_db
+from app.database.client import identity_db, mongo_client
 
 
 # =========================
@@ -15,6 +18,8 @@ DEFAULT_TENANT_FEATURES = {
     "sipremo_tools": False,
     "public_trigger": False,
 }
+
+DEFAULT_TENANT_ADMIN_PASSWORD = "1234"
 
 
 def normalize_assignment_fields(raw) -> list:
@@ -59,6 +64,65 @@ def normalize_tenant_features(raw) -> dict:
     for key in DEFAULT_TENANT_FEATURES:
         out[key] = bool(raw.get(key))
     return out
+
+
+def slugify_tenant_name(name: str) -> str:
+    normalized = unicodedata.normalize("NFD", name or "")
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", ascii_only).strip("-").lower()
+    return slug or "tenant"
+
+
+def generate_unique_slug_and_database(base_name: str) -> tuple[str, str]:
+    base_slug = slugify_tenant_name(base_name)
+    attempt = 0
+
+    while True:
+        suffix = "" if attempt == 0 else f"-{attempt + 1}"
+        candidate = f"{base_slug}{suffix}"
+        has_slug = identity_db.tenants.find_one({"slug": candidate}, {"_id": 1})
+        has_database = identity_db.tenants.find_one(
+            {"database": candidate},
+            {"_id": 1},
+        )
+        if not has_slug and not has_database:
+            return candidate, candidate
+        attempt += 1
+
+
+def seed_default_tenant_admin(
+    tenant_database: str,
+    tenant_name: str,
+    tenant_slug: str,
+):
+    db = mongo_client[tenant_database]
+    username = f"user.{tenant_slug}"
+
+    if db.users.find_one({"username": username}, {"_id": 1}):
+        return
+
+    now = datetime.utcnow()
+    password_hash = bcrypt.hashpw(
+        DEFAULT_TENANT_ADMIN_PASSWORD.encode("utf-8"),
+        bcrypt.gensalt(),
+    ).decode("utf-8")
+
+    db.users.insert_one(
+        {
+            "tenant_id": tenant_name,
+            "name": "Administrador",
+            "username": username,
+            "password_hash": password_hash,
+            "email": f"{username}@tenant.local",
+            "phone": None,
+            "type": "admin",
+            "assignments": [],
+            "active": True,
+            "terms": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
 
 
 def resolve_public_tenant_features(host: str | None, tenant_db: str | None) -> dict:
@@ -152,18 +216,12 @@ def list_active_tenants_for_login():
 # =========================
 def create_tenant(tenant_data: dict):
 
-    for field in ("name", "slug", "database"):
+    for field in ("name",):
         if not tenant_data.get(field):
             raise ValueError(f"Missing required field: {field}")
 
-    slug = str(tenant_data["slug"]).strip()
-    database = str(tenant_data["database"]).strip()
     name = str(tenant_data["name"]).strip()
-
-    if identity_db.tenants.find_one({"slug": slug}):
-        raise ValueError("Tenant slug already exists")
-    if identity_db.tenants.find_one({"database": database}):
-        raise ValueError("Database name already in use")
+    slug, database = generate_unique_slug_and_database(name)
 
     tenant_document = {
         "name": name,
@@ -190,6 +248,17 @@ def create_tenant(tenant_data: dict):
         )
 
     result = identity_db.tenants.insert_one(tenant_document)
+
+    try:
+        seed_default_tenant_admin(
+            tenant_database=database,
+            tenant_name=name,
+            tenant_slug=slug,
+        )
+    except Exception as e:
+        identity_db.tenants.delete_one({"_id": result.inserted_id})
+        mongo_client.drop_database(database)
+        raise RuntimeError(f"Error creating tenant default admin: {e}")
 
     tenant_document["_id"] = str(result.inserted_id)
 

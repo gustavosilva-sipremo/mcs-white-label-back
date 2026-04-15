@@ -36,6 +36,8 @@ async def create_tenant_route(tenant: dict):
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =========================

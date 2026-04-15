@@ -2,7 +2,7 @@ import bcrypt
 from bson import ObjectId
 from bson.errors import InvalidId
 from datetime import datetime
-from app.database.client import get_tenant_db
+from app.database.client import get_tenant_db, identity_db
 
 
 # =========================
@@ -42,6 +42,11 @@ def list_users(tenant_database: str):
 def create_user(tenant_database: str, user_data: dict):
 
     db = get_tenant_db(tenant_database)
+    tenant = identity_db.tenants.find_one(
+        {"database": tenant_database},
+        {"name": 1},
+    )
+    tenant_name = str((tenant or {}).get("name") or tenant_database)
 
     user_type = str(user_data.get("type", "")).strip()
     raw_username = (user_data.get("username") or "").strip()
@@ -61,7 +66,7 @@ def create_user(tenant_database: str, user_data: dict):
     ).decode("utf-8")
 
     user_document = {
-        "tenant_id": tenant_database,
+        "tenant_id": tenant_name,
         "name": user_data["name"],
         "password_hash": password_hash,
         "email": user_data["email"],
