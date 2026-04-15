@@ -4,7 +4,7 @@ from jose import jwt, JWTError
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from app.database.client import get_tenant_db
+from app.database.client import get_tenant_db, identity_db
 from app.config import (
     JWT_SECRET,
     REFRESH_JWT_SECRET,
@@ -83,6 +83,15 @@ def login_user(data: dict):
 
     if not tenant_db or not username or not password:
         raise ValueError("Missing credentials")
+
+    tenant = identity_db.tenants.find_one(
+        {"database": tenant_db},
+        {"active": 1},
+    )
+    if not tenant:
+        raise ValueError("Invalid tenant")
+    if tenant.get("active") is not True:
+        raise ValueError("Tenant is inactive")
 
     # conectar tenant
     try:

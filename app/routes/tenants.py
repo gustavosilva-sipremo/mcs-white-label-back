@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
+from app.dependencies.auth_dependency import get_current_user
 from app.services.tenant_service import (
     list_tenants,
     create_tenant,
@@ -57,23 +58,43 @@ async def get_tenant_route(tenant_id: str):
 # Update Tenant
 # =========================
 @router.patch("/{tenant_id}")
-async def update_tenant_route(tenant_id: str, tenant: dict):
+async def update_tenant_route(
+    tenant_id: str,
+    tenant: dict,
+    current_user=Depends(get_current_user),
+):
 
     try:
-        return update_tenant(tenant_id, tenant)
+        return update_tenant(
+            tenant_id,
+            tenant,
+            actor_tenant_database=current_user.get("tenant_database"),
+        )
 
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        detail = str(e)
+        if detail == "Tenant not found":
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
 
 
 # =========================
 # Delete Tenant
 # =========================
 @router.delete("/{tenant_id}")
-async def delete_tenant_route(tenant_id: str):
+async def delete_tenant_route(
+    tenant_id: str,
+    current_user=Depends(get_current_user),
+):
 
     try:
-        return delete_tenant(tenant_id)
+        return delete_tenant(
+            tenant_id,
+            actor_tenant_database=current_user.get("tenant_database"),
+        )
 
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        detail = str(e)
+        if detail == "Tenant not found":
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
