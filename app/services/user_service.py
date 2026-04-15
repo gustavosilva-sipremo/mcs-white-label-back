@@ -1,8 +1,8 @@
 import bcrypt
 from bson import ObjectId
 from bson.errors import InvalidId
-from datetime import datetime
 from app.database.client import get_tenant_db, identity_db
+from app.utils.datetime_utils import now_brasilia
 
 
 # =========================
@@ -75,8 +75,8 @@ def create_user(tenant_database: str, user_data: dict):
         "assignments": user_data.get("assignments", []),
         "active": True,
         "terms": user_data.get("terms", []),
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
+        "created_at": now_brasilia(),
+        "updated_at": now_brasilia(),
     }
     user_document["username"] = username_value
 
@@ -149,7 +149,7 @@ def update_user(
         else:
             user_data["username"] = None
 
-    user_data["updated_at"] = datetime.utcnow()
+    user_data["updated_at"] = now_brasilia()
 
     result = db.users.update_one({"_id": obj_id}, {"$set": user_data})
 

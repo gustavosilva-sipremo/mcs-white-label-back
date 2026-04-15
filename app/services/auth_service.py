@@ -1,10 +1,11 @@
 import bcrypt
-from datetime import datetime, timedelta
+from datetime import timedelta
 from jose import jwt, JWTError
 from bson import ObjectId
 from bson.errors import InvalidId
 
 from app.database.client import get_tenant_db, identity_db
+from app.utils.datetime_utils import expiration_from_now_brasilia, now_brasilia
 from app.config import (
     JWT_SECRET,
     REFRESH_JWT_SECRET,
@@ -24,7 +25,9 @@ def create_access_token(user_id: str, tenant_db: str):
     Gera JWT de acesso
     """
 
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = expiration_from_now_brasilia(
+        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
 
     payload = {
         "sub": str(user_id),
@@ -40,7 +43,7 @@ def create_refresh_token(user_id: str, tenant_db: str):
     Gera JWT de refresh (stateless, sem persistência em banco).
     """
 
-    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    expire = expiration_from_now_brasilia(timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
 
     payload = {
         "sub": str(user_id),
@@ -223,7 +226,7 @@ def update_logged_user_terms(
         {
             "$set": {
                 "terms": normalized_terms,
-                "updated_at": datetime.utcnow(),
+                "updated_at": now_brasilia(),
             }
         },
     )

@@ -1,8 +1,8 @@
 from bson import ObjectId
 from bson.errors import InvalidId
-from datetime import datetime
 
 from app.database.client import get_tenant_db
+from app.utils.datetime_utils import now_brasilia
 
 COLLECTION = "generic_lists"
 
@@ -74,8 +74,8 @@ def create_generic_list(tenant_database: str, data: dict):
         "name": name,
         "description": desc,
         "items": items,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
+        "created_at": now_brasilia(),
+        "updated_at": now_brasilia(),
     }
     result = db[COLLECTION].insert_one(doc)
     doc["_id"] = result.inserted_id
@@ -120,7 +120,7 @@ def update_generic_list(tenant_database: str, list_id: str, data: dict):
     if not data:
         raise ValueError("No fields provided for update")
 
-    data["updated_at"] = datetime.utcnow()
+    data["updated_at"] = now_brasilia()
 
     result = db[COLLECTION].update_one({"_id": oid}, {"$set": data})
     if result.matched_count == 0:

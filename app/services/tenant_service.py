@@ -1,11 +1,11 @@
 from bson import ObjectId
 from bson.errors import InvalidId
-from datetime import datetime
 import bcrypt
 import re
 import unicodedata
 
 from app.database.client import identity_db, mongo_client
+from app.utils.datetime_utils import now_brasilia
 
 
 # =========================
@@ -101,7 +101,7 @@ def seed_default_tenant_admin(
     if db.users.find_one({"username": username}, {"_id": 1}):
         return
 
-    now = datetime.utcnow()
+    now = now_brasilia()
     password_hash = bcrypt.hashpw(
         DEFAULT_TENANT_ADMIN_PASSWORD.encode("utf-8"),
         bcrypt.gensalt(),
@@ -249,8 +249,8 @@ def create_tenant(tenant_data: dict):
         "slug": slug,
         "database": database,
         "active": bool(tenant_data.get("active", True)),
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
+        "created_at": now_brasilia(),
+        "updated_at": now_brasilia(),
     }
 
     if tenant_data.get("type"):
@@ -362,7 +362,7 @@ def update_tenant(
     if "terms_settings" in tenant_data and tenant_data["terms_settings"] is not None:
         tenant_data["terms_settings"] = str(tenant_data["terms_settings"]).strip()
 
-    tenant_data["updated_at"] = datetime.utcnow()
+    tenant_data["updated_at"] = now_brasilia()
 
     result = identity_db.tenants.update_one(
         {"_id": obj_id},

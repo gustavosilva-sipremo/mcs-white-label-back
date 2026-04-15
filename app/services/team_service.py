@@ -1,8 +1,8 @@
 from bson import ObjectId
 from bson.errors import InvalidId
-from datetime import datetime
 
 from app.database.client import get_tenant_db
+from app.utils.datetime_utils import now_brasilia
 
 
 def validate_object_id(team_id: str):
@@ -67,8 +67,8 @@ def create_team(tenant_database: str, data: dict):
         "name": name,
         "description": desc,
         "member_user_ids": member_oids,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
+        "created_at": now_brasilia(),
+        "updated_at": now_brasilia(),
     }
     result = db.teams.insert_one(doc)
     doc["_id"] = result.inserted_id
@@ -111,7 +111,7 @@ def update_team(tenant_database: str, team_id: str, data: dict):
     if not data:
         raise ValueError("No fields provided for update")
 
-    data["updated_at"] = datetime.utcnow()
+    data["updated_at"] = now_brasilia()
 
     result = db.teams.update_one({"_id": oid}, {"$set": data})
     if result.matched_count == 0:
