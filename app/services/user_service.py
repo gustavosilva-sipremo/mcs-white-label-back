@@ -202,6 +202,10 @@ def create_user(tenant_database: str, user_data: dict):
 
     user_type = str(user_data.get("type", "")).strip()
     raw_username = (user_data.get("username") or "").strip()
+    raw_email = str(user_data.get("email") or "").strip()
+    email_value = raw_email or None
+    raw_phone = str(user_data.get("phone") or "").strip()
+    phone_value = raw_phone or None
     assignments_payload = validate_assignments_payload(
         db,
         tenant_database,
@@ -226,8 +230,8 @@ def create_user(tenant_database: str, user_data: dict):
         "tenant_id": tenant_name,
         "name": user_data["name"],
         "password_hash": password_hash,
-        "email": user_data["email"],
-        "phone": user_data.get("phone"),
+        "email": email_value,
+        "phone": phone_value,
         "type": user_type,
         "assignments": assignments_payload,
         "active": True,

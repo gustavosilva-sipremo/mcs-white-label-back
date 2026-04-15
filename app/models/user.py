@@ -16,7 +16,7 @@ class UserCreate(BaseModel):
     name: str
     username: Optional[str] = None
     password: str
-    email: EmailStr
+    email: Optional[EmailStr] = None
     phone: Optional[str] = None
     type: str
     assignments: List[Assignment] = Field(default_factory=list)
