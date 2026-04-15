@@ -1,10 +1,10 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import List, Optional
+from typing import List, Optional, Union
 
 
 class Assignment(BaseModel):
     type: str
-    value: str
+    value: Union[str, float, List[str]]
 
 
 class Terms(BaseModel):

@@ -20,13 +20,21 @@ DEFAULT_TENANT_FEATURES = {
 }
 
 DEFAULT_TENANT_ADMIN_PASSWORD = "1234"
+ASSIGNMENT_TYPES = {"text", "number", "select", "multi-select"}
+ASSIGNMENT_TYPES_WITH_LIST = {"select", "multi-select"}
+GENERIC_LISTS_COLLECTION = "generic_lists"
 
 
-def normalize_assignment_fields(raw) -> list:
+def normalize_assignment_fields(raw, tenant_database: str | None = None) -> list:
     """
     Valida e normaliza a configuração de campos de atribuição do tenant.
-    Cada item: { "label": str, "value": str, "type": "text" }.
-    Por enquanto apenas type=text é aceito.
+    Cada item:
+    {
+      "label": str,
+      "value": str,
+      "type": "text" | "number" | "select" | "multi-select",
+      "list_id": str (obrigatório para select/multi-select)
+    }.
     """
 
     if not raw or not isinstance(raw, list):
@@ -34,6 +42,12 @@ def normalize_assignment_fields(raw) -> list:
 
     out = []
     seen_values = set()
+    list_ids_cache: set[str] = set()
+    lists_collection = (
+        mongo_client[tenant_database][GENERIC_LISTS_COLLECTION]
+        if tenant_database
+        else None
+    )
 
     for item in raw:
         if not isinstance(item, dict):
@@ -43,12 +57,31 @@ def normalize_assignment_fields(raw) -> list:
         ftype = str(item.get("type", "text")).strip().lower()
         if not label or not value:
             continue
-        if ftype != "text":
-            continue
+        if ftype not in ASSIGNMENT_TYPES:
+            raise ValueError(f"Invalid assignment field type: {ftype}")
         if value in seen_values:
             continue
+        list_id = None
+        if ftype in ASSIGNMENT_TYPES_WITH_LIST:
+            list_id = str(item.get("list_id", "")).strip()
+            if not list_id:
+                raise ValueError(
+                    f"Field '{value}' with type '{ftype}' requires list_id"
+                )
+            try:
+                oid = ObjectId(list_id)
+            except InvalidId:
+                raise ValueError(f"Invalid list_id for field '{value}'")
+            if lists_collection is not None and list_id not in list_ids_cache:
+                linked = lists_collection.find_one({"_id": oid}, {"_id": 1})
+                if not linked:
+                    raise ValueError(f"Linked list not found for field '{value}'")
+                list_ids_cache.add(list_id)
         seen_values.add(value)
-        out.append({"label": label, "value": value, "type": "text"})
+        normalized = {"label": label, "value": value, "type": ftype}
+        if list_id:
+            normalized["list_id"] = list_id
+        out.append(normalized)
 
     return out
 
@@ -267,7 +300,8 @@ def create_tenant(tenant_data: dict):
         tenant_document["features"] = tenant_data["features"]
     if tenant_data.get("assignments") is not None:
         tenant_document["assignments"] = normalize_assignment_fields(
-            tenant_data.get("assignments")
+            tenant_data.get("assignments"),
+            database,
         )
 
     result = identity_db.tenants.insert_one(tenant_document)
@@ -334,8 +368,12 @@ def update_tenant(
         raise ValueError("You cannot deactivate your own tenant")
 
     if "assignments" in tenant_data:
+        tenant_db_for_assignments = str(
+            tenant_data.get("database") or target_tenant.get("database") or ""
+        ).strip()
         tenant_data["assignments"] = normalize_assignment_fields(
-            tenant_data.get("assignments")
+            tenant_data.get("assignments"),
+            tenant_db_for_assignments or None,
         )
 
     if "slug" in tenant_data and tenant_data["slug"] is not None:
