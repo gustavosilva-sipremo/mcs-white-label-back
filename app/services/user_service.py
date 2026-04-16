@@ -61,11 +61,18 @@ def load_list_allowed_values(db, list_id: str) -> set[str]:
     if not linked_list:
         raise ValueError("Linked generic list not found for assignment")
 
+    option_schema = linked_list.get("option_schema")
+    key_field = "value"
+    if isinstance(option_schema, dict):
+        raw_key = str(option_schema.get("key_field", "")).strip()
+        if raw_key:
+            key_field = raw_key
+
     values = set()
     for item in linked_list.get("items") or []:
         if not isinstance(item, dict):
             continue
-        raw_value = str(item.get("value", "")).strip()
+        raw_value = str(item.get(key_field, "")).strip()
         if raw_value:
             values.add(raw_value)
     return values

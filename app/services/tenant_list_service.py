@@ -5,6 +5,8 @@ from app.database.client import get_tenant_db
 from app.utils.datetime_utils import now_brasilia
 
 COLLECTION = "generic_lists"
+DEFAULT_OPTION_FIELDS = ["label", "value"]
+DEFAULT_KEY_FIELD = "value"
 
 
 def validate_object_id(list_id: str):
@@ -14,35 +16,95 @@ def validate_object_id(list_id: str):
         raise ValueError("Invalid list_id")
 
 
-def normalize_items(items) -> list:
-    if not items:
-        return []
-    out = []
-    seen_values = set()
+def infer_option_fields(items) -> list[str]:
+    if not isinstance(items, list):
+        return list(DEFAULT_OPTION_FIELDS)
+
     for item in items:
         if not isinstance(item, dict):
             continue
-        label = str(item.get("label", "")).strip()
-        value = str(item.get("value", "")).strip()
-        if not label and not value:
+        keys = [str(key).strip() for key in item.keys() if str(key).strip()]
+        if keys:
+            return keys
+
+    return list(DEFAULT_OPTION_FIELDS)
+
+
+def normalize_option_schema(option_schema, fallback_items=None) -> dict:
+    fallback_fields = infer_option_fields(fallback_items)
+
+    if not isinstance(option_schema, dict):
+        fields = fallback_fields
+        key_field = DEFAULT_KEY_FIELD if DEFAULT_KEY_FIELD in fields else fields[0]
+        return {"fields": fields, "key_field": key_field}
+
+    raw_fields = option_schema.get("fields")
+    fields = []
+    seen_fields = set()
+    if isinstance(raw_fields, list):
+        for field in raw_fields:
+            name = str(field).strip()
+            if not name or name in seen_fields:
+                continue
+            fields.append(name)
+            seen_fields.add(name)
+
+    if not fields:
+        fields = fallback_fields
+
+    key_field = str(option_schema.get("key_field", "")).strip()
+    if not key_field:
+        key_field = DEFAULT_KEY_FIELD if DEFAULT_KEY_FIELD in fields else fields[0]
+    if key_field not in fields:
+        raise ValueError("option_schema.key_field must be present in option_schema.fields")
+
+    return {"fields": fields, "key_field": key_field}
+
+
+def normalize_items(items, option_schema: dict) -> list:
+    if not items:
+        return []
+
+    fields = option_schema.get("fields") or list(DEFAULT_OPTION_FIELDS)
+    key_field = option_schema.get("key_field") or DEFAULT_KEY_FIELD
+    if key_field not in fields:
+        raise ValueError("Invalid option schema configuration")
+
+    out = []
+    seen_keys = set()
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        if not label or not value:
-            raise ValueError("Each item must have both label and value")
-        if value in seen_values:
-            raise ValueError(f"Duplicate item value: {value}")
-        seen_values.add(value)
-        out.append({"label": label, "value": value})
+
+        normalized_item = {field: str(item.get(field, "")).strip() for field in fields}
+        has_any_value = any(normalized_item[field] for field in fields)
+        if not has_any_value:
+            continue
+
+        missing_fields = [field for field in fields if not normalized_item[field]]
+        if missing_fields:
+            raise ValueError(
+                f"Each item must provide all configured fields: {', '.join(fields)}"
+            )
+
+        key_value = normalized_item[key_field]
+        if key_value in seen_keys:
+            raise ValueError(f"Duplicate item key in field '{key_field}': {key_value}")
+        seen_keys.add(key_value)
+        out.append(normalized_item)
     return out
 
 
 def serialize_generic_list(doc: dict) -> dict:
     out = dict(doc)
     out["_id"] = str(out["_id"])
+    option_schema = normalize_option_schema(out.get("option_schema"), out.get("items"))
     items = out.get("items") or []
     if not isinstance(items, list):
         items = []
-    out["items"] = items
-    out["itemsCount"] = len(items)
+    out["option_schema"] = option_schema
+    out["items"] = normalize_items(items, option_schema)
+    out["itemsCount"] = len(out["items"])
     return out
 
 
@@ -68,11 +130,16 @@ def create_generic_list(tenant_database: str, data: dict):
     if desc is not None:
         desc = str(desc).strip() or None
 
-    items = normalize_items(data.get("items", []))
+    option_schema = normalize_option_schema(
+        data.get("option_schema"),
+        data.get("items", []),
+    )
+    items = normalize_items(data.get("items", []), option_schema)
 
     doc = {
         "name": name,
         "description": desc,
+        "option_schema": option_schema,
         "items": items,
         "created_at": now_brasilia(),
         "updated_at": now_brasilia(),
@@ -94,6 +161,13 @@ def get_generic_list_by_id(tenant_database: str, list_id: str):
 def update_generic_list(tenant_database: str, list_id: str, data: dict):
     db = get_tenant_db(tenant_database)
     oid = validate_object_id(list_id)
+    current_doc = db[COLLECTION].find_one({"_id": oid})
+    if not current_doc:
+        raise ValueError("List not found")
+    current_schema = normalize_option_schema(
+        current_doc.get("option_schema"),
+        current_doc.get("items", []),
+    )
 
     for f in ["_id", "created_at"]:
         data.pop(f, None)
@@ -114,8 +188,23 @@ def update_generic_list(tenant_database: str, list_id: str, data: dict):
         else:
             data["description"] = str(data["description"]).strip() or None
 
-    if "items" in data and data["items"] is not None:
-        data["items"] = normalize_items(data["items"])
+    schema_for_items = current_schema
+    if "option_schema" in data:
+        schema_for_items = normalize_option_schema(
+            data["option_schema"],
+            data["items"]
+            if "items" in data and data["items"] is not None
+            else current_doc.get("items", []),
+        )
+        data["option_schema"] = schema_for_items
+
+    if "items" in data:
+        if data["items"] is None:
+            data["items"] = []
+        else:
+            data["items"] = normalize_items(data["items"], schema_for_items)
+    elif "option_schema" in data:
+        data["items"] = normalize_items(current_doc.get("items", []), schema_for_items)
 
     if not data:
         raise ValueError("No fields provided for update")
