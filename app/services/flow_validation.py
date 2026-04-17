@@ -4,6 +4,7 @@ Structural and semantic validation for flow graphs persisted as React Flow JSON.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.services import (
@@ -179,10 +180,12 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
         data = node.get("data")
         if not isinstance(data, dict):
             continue
-        cfg = data.get("config")
-        if cfg is None:
-            continue
-        if not isinstance(cfg, dict):
+        raw_cfg = data.get("config")
+        if raw_cfg is None:
+            cfg: dict = {}
+        elif isinstance(raw_cfg, dict):
+            cfg = raw_cfg
+        else:
             raise ValueError(f"Node {nid}: config must be an object")
 
         bt = _node_block_type(node)
@@ -195,6 +198,61 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     raise ValueError(
                         f"Node {nid}: trigger config.mode must be 'preset' or 'customizable'",
                     )
+            m_final = str(mode or "preset").strip().lower()
+            branch_key = str(cfg.get("branchKey", "")).strip()
+            if not branch_key:
+                raise ValueError(
+                    f"Node {nid}: trigger config.branchKey is required",
+                )
+            if not re.fullmatch(r"[a-zA-Z0-9_-]+", branch_key):
+                raise ValueError(
+                    f"Node {nid}: trigger branchKey may contain only letters, "
+                    "digits, hyphen and underscore",
+                )
+            home_cta = cfg.get("homeCtaLabel")
+            if home_cta is not None and len(str(home_cta)) > 200:
+                raise ValueError(
+                    f"Node {nid}: trigger homeCtaLabel must be at most 200 characters",
+                )
+            summary = cfg.get("summary")
+            if summary is not None and len(str(summary)) > 300:
+                raise ValueError(
+                    f"Node {nid}: trigger summary must be at most 300 characters",
+                )
+            if m_final == "customizable":
+                fields = cfg.get("fields")
+                if not isinstance(fields, list) or len(fields) == 0:
+                    raise ValueError(
+                        f"Node {nid}: customizable trigger requires config.fields "
+                        "with at least one field",
+                    )
+                key_pat = re.compile(r"^[a-z][a-z0-9_]*$")
+                for i, field in enumerate(fields):
+                    if not isinstance(field, dict):
+                        raise ValueError(
+                            f"Node {nid}: trigger fields[{i}] must be an object",
+                        )
+                    fk = str(field.get("key", "")).strip()
+                    fl = str(field.get("label", "")).strip()
+                    if not fk or not key_pat.match(fk):
+                        raise ValueError(
+                            f"Node {nid}: trigger fields[{i}].key must be "
+                            "snake_case starting with a letter (a-z)",
+                        )
+                    if not fl:
+                        raise ValueError(
+                            f"Node {nid}: trigger fields[{i}].label is required",
+                        )
+                    ft = field.get("type")
+                    if ft is not None and str(ft).strip().lower() not in (
+                        "text",
+                        "textarea",
+                        "number",
+                    ):
+                        raise ValueError(
+                            f"Node {nid}: trigger fields[{i}].type must be "
+                            "text, textarea, or number when set",
+                        )
 
         if bt == "data":
             ref = cfg.get("formRef")
@@ -279,12 +337,17 @@ def build_blocks_index(
         data = node.get("data") if isinstance(node.get("data"), dict) else {}
         cfg = data.get("config") if isinstance(data.get("config"), dict) else {}
         if bt == "trigger":
+            flds = cfg.get("fields")
+            field_count = len(flds) if isinstance(flds, list) else 0
             triggers.append(
                 {
                     "nodeId": nid,
                     "mode": cfg.get("mode"),
                     "branchKey": cfg.get("branchKey"),
                     "label": data.get("label"),
+                    "homeCtaLabel": cfg.get("homeCtaLabel"),
+                    "summary": cfg.get("summary"),
+                    "fieldCount": field_count,
                 },
             )
         if bt == "data":
