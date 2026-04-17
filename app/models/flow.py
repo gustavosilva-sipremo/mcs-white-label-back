@@ -20,6 +20,8 @@ class FlowCreate(BaseModel):
 class FlowUpdate(BaseModel):
     name: Optional[str] = None
     status: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_main: Optional[bool] = None
 
 
 class FlowVersionSave(BaseModel):

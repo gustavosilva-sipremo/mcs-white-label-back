@@ -59,6 +59,10 @@ def _default_graph() -> dict[str, Any]:
 def serialize_flow(doc: dict) -> dict:
     out = dict(doc)
     out["_id"] = str(out["_id"])
+    if "is_active" not in out:
+        out["is_active"] = True
+    if "is_main" not in out:
+        out["is_main"] = False
     return out
 
 
@@ -102,9 +106,12 @@ def _validate_and_index(tenant_database: str, graph: dict[str, Any]) -> dict[str
 
 
 def list_flows(tenant_database: str) -> list[dict]:
+    """Active flows only; legacy docs without `is_active` are treated as active."""
     try:
         db = get_tenant_db(tenant_database)
-        cursor = db[FLOWS_COLLECTION].find({}).sort(
+        cursor = db[FLOWS_COLLECTION].find(
+            {"$or": [{"is_active": True}, {"is_active": {"$exists": False}}]},
+        ).sort(
             [("updated_at", -1), ("name", 1)],
         )
         return [serialize_flow(d) for d in cursor]
@@ -133,6 +140,8 @@ def create_flow(tenant_database: str, data: dict, created_by: str | None) -> dic
         "description": desc,
         "status": "draft",
         "current_version": 1,
+        "is_active": True,
+        "is_main": False,
         "created_at": now,
         "updated_at": now,
     }
@@ -355,6 +364,20 @@ def update_flow(tenant_database: str, flow_id: str, data: dict) -> dict:
         if st not in ALLOWED_FLOW_STATUS:
             raise ValueError(f"status must be one of: {', '.join(sorted(ALLOWED_FLOW_STATUS))}")
         data["status"] = st
+
+    if "is_active" in data and data["is_active"] is not None:
+        data["is_active"] = bool(data["is_active"])
+        if data["is_active"] is False:
+            data["is_main"] = False
+
+    if "is_main" in data and data["is_main"] is not None:
+        data["is_main"] = bool(data["is_main"])
+        if data["is_main"] is True:
+            now = now_brasilia()
+            db[FLOWS_COLLECTION].update_many(
+                {"_id": {"$ne": oid}},
+                {"$set": {"is_main": False, "updated_at": now}},
+            )
 
     if not data:
         raise ValueError("No fields provided for update")
