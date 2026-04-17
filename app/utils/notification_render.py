@@ -42,10 +42,19 @@ def strip_html_to_plain(html: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def strip_urls_for_toast(text: str) -> str:
-    """Remove URLs para prévia PWA (toast só com mensagem)."""
-    s = re.sub(r"https?://[^\s]+", "", text or "", flags=re.I)
-    return re.sub(r"\s+", " ", s).strip()
+def strip_urls_keep_newlines(text: str) -> str:
+    """Remove URLs mantendo quebras de linha (toast PWA)."""
+
+    def _clean_line(line: str) -> str:
+        s = re.sub(r"https?://[^\s]+", "", line or "", flags=re.I)
+        return re.sub(r"[ \t]+", " ", s).rstrip()
+
+    lines = [_clean_line(line) for line in (text or "").split("\n")]
+    while lines and lines[0] == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines).strip()
 
 
 def sanitize_brand_color(value: str | None) -> str:
@@ -62,15 +71,47 @@ def sanitize_brand_color(value: str | None) -> str:
     return "#4f46e5"
 
 
+def sanitize_logo_url(value: str | None) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
+    u = value.strip()[:800]
+    if not re.match(r"^https?://", u, re.I):
+        return None
+    if re.search(r"[\s\"'<>]", u):
+        return None
+    return u
+
+
 def _looks_like_html_fragment(s: str) -> bool:
     return bool(_HTML_BLOCK.search(s or ""))
 
 
+def _fragment_to_plain_multiline(s: str) -> str:
+    if not (s or "").strip():
+        return ""
+    if _looks_like_html_fragment(s):
+        t = s
+        t = re.sub(r"<br\s*/?>", "\n", t, flags=re.I)
+        t = re.sub(r"</p\s*>", "\n\n", t, flags=re.I)
+        t = re.sub(r"</div\s*>", "\n", t, flags=re.I)
+        t = re.sub(r"<li[^>]*>", "\n- ", t, flags=re.I)
+        t = re.sub(r"</li>\s*", "", t, flags=re.I)
+        t = re.sub(r"<[^>]+>", "", t)
+        t = unescape(t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return t.strip()
+    return (s or "").strip()
+
+
+def _pwa_plain_from_body_footer(b_raw: str, f_raw: str) -> str:
+    parts: list[str] = []
+    for frag in (b_raw.strip(), f_raw.strip()):
+        if frag:
+            parts.append(_fragment_to_plain_multiline(frag))
+    return strip_urls_keep_newlines("\n\n".join(parts))[:2000]
+
+
 def _plain_text_to_email_html(text: str) -> str:
-    """
-    Converte texto simples em HTML seguro: quebras de linha, parágrafos e listas (- ou *).
-    Se o autor já usar tags HTML, use _looks_like_html_fragment e pule esta etapa.
-    """
     raw = (text or "").strip()
     if not raw:
         return ""
@@ -120,7 +161,6 @@ def _plain_text_to_email_html(text: str) -> str:
 
 
 def enrich_email_fragment(fragment: str) -> str:
-    """Quebras de linha e listas para trechos sem HTML; preserva HTML explícito."""
     frag = (fragment or "").strip()
     if not frag:
         return ""
@@ -129,12 +169,59 @@ def enrich_email_fragment(fragment: str) -> str:
     return _plain_text_to_email_html(frag)
 
 
+def _anchor_to_button_block(url: str, primary: str, foreground: str) -> str:
+    safe = escape(url, quote=True)
+    return (
+        '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
+        'style="margin:14px 0 10px;">'
+        '<tr><td align="center" style="text-align:center;padding:0 12px;">'
+        f'<a href="{safe}" target="_blank" rel="noopener noreferrer" '
+        f'style="display:inline-block;padding:11px 22px;background-color:{primary};'
+        f"color:{foreground} !important;text-decoration:none;border-radius:9999px;font-weight:600;"
+        "font-size:13px;font-family:inherit;line-height:1.25;"
+        'border:1px solid rgba(15,23,42,0.08);">Confirmar Visualização</a>'
+        "</td></tr></table>"
+    )
+
+
+def linkify_email_inner_html(
+    html: str,
+    primary: str,
+    primary_foreground: str | None = None,
+) -> str:
+    """Transforma <a href=http...> e URLs soltas em botões estilo CTA (tema claro)."""
+
+    fg = sanitize_brand_color(primary_foreground) if primary_foreground else "#ffffff"
+
+    def replace_anchor(m: re.Match) -> str:
+        tag = m.group(0)
+        hm = re.search(r'href\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+        url = (hm.group(1).strip() if hm else "")[:900]
+        if not re.match(r"^https?://", url, re.I):
+            return tag
+        return _anchor_to_button_block(url, primary, fg)
+
+    out = re.sub(r"<a\s[^>]*href\s*=\s*[\"'][^\"']+[\"'][^>]*>.*?</a>", replace_anchor, html, flags=re.I | re.S)
+
+    def bare_url(m: re.Match) -> str:
+        prefix, url = m.group(1), m.group(2)
+        if prefix == "=" or prefix == '"' or prefix == "'":
+            return m.group(0)
+        if not re.match(r"^https?://", url, re.I):
+            return m.group(0)
+        return prefix + _anchor_to_button_block(url, primary, fg)
+
+    out = re.sub(r"(.)(https?://[^\s<>'\"]+)", bare_url, out)
+    return out
+
+
 def wrap_email_document(
     inner_html: str,
     preview_title: str = "Pré-visualização",
     brand_primary: str | None = None,
+    logo_url: str | None = None,
 ) -> str:
-    """Layout HTML compacto, tema claro — acento na cor principal do tenant."""
+    """Layout HTML compacto, tema claro — logo opcional, acento na cor do tenant."""
     primary = sanitize_brand_color(brand_primary)
     safe_inner = inner_html or ""
     safe_title = (
@@ -143,6 +230,15 @@ def wrap_email_document(
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+    logo = sanitize_logo_url(logo_url)
+    logo_row = ""
+    if logo:
+        le = escape(logo, quote=True)
+        logo_row = f"""<tr>
+            <td style="padding:14px 16px 0;background:#ffffff;text-align:left;">
+              <img src="{le}" alt="" width="140" height="44" style="max-height:44px;width:auto;height:auto;display:block;border:0;outline:none;text-decoration:none;" />
+            </td>
+          </tr>"""
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -157,6 +253,7 @@ def wrap_email_document(
     <tr>
       <td style="background:#ffffff;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,0.06);">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+          {logo_row}
           <tr>
             <td style="padding:12px 16px 10px;border-left:4px solid {primary};background:#f8fafc;">
               <p style="margin:0;font-size:10px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#64748b;">Notificação</p>
@@ -208,6 +305,8 @@ def render_preview_bundle(
     *,
     preview_title: str = "Pré-visualização",
     brand_primary: str | None = None,
+    brand_primary_foreground: str | None = None,
+    logo_url: str | None = None,
     context: dict | None = None,
 ) -> dict:
     h = render_jinja_fragment(header_template, context)
@@ -219,29 +318,31 @@ def render_preview_bundle(
     f_r = enrich_email_fragment(f)
 
     inner = build_inner_html(h_r, b_r, f_r)
-    email_html = wrap_email_document(
+    primary = sanitize_brand_color(brand_primary)
+    inner_linked = linkify_email_inner_html(
         inner,
+        primary,
+        brand_primary_foreground,
+    )
+    email_html = wrap_email_document(
+        inner_linked,
         preview_title=preview_title,
         brand_primary=brand_primary,
+        logo_url=logo_url,
     )
 
     main_plain = strip_html_to_plain(f"{h_r} {b_r} {f_r}")
     sms_rendered = render_jinja_fragment(sms_template, context)
     sms_text = strip_html_to_plain(sms_rendered)
 
-    # Toast PWA: título = nome do template (evita repetir cabeçalho no corpo).
     toast_title = (preview_title or "Notificação").strip()[:120] or "Notificação"
-    body_html_for_pwa = f"{b_r} {f_r}".strip()
-    body_plain = strip_html_to_plain(body_html_for_pwa) if body_html_for_pwa else ""
-    if not body_plain and b_r:
-        body_plain = strip_html_to_plain(b_r)
-    if not body_plain and h_r:
-        body_plain = strip_html_to_plain(h_r)
-    body_for_pwa = strip_urls_for_toast(body_plain)[:900]
+    pwa_body = _pwa_plain_from_body_footer(b, f)
+    if not pwa_body and h:
+        pwa_body = strip_urls_keep_newlines(_fragment_to_plain_multiline(h))[:2000]
 
     return {
         "email_html": email_html,
         "sms_text": sms_text,
         "main_plain": main_plain,
-        "pwa": {"title": toast_title, "body": body_for_pwa},
+        "pwa": {"title": toast_title, "body": pwa_body},
     }

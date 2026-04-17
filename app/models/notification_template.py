@@ -68,3 +68,11 @@ class NotificationPreviewBody(BaseModel):
         default=None,
         description="Cor principal do tenant (#hex ou hsl(...)) para o e-mail.",
     )
+    brand_primary_foreground: str | None = Field(
+        default=None,
+        description="Cor do texto sobre o botão / acento (tema claro), ex.: hsl(...).",
+    )
+    logo_url: str | None = Field(
+        default=None,
+        description="URL absoluta https do logo do tenant para o cabeçalho do e-mail.",
+    )

@@ -143,6 +143,8 @@ def preview_notification_templates(
     *,
     preview_title: str = "Pré-visualização",
     brand_primary: str | None = None,
+    brand_primary_foreground: str | None = None,
+    logo_url: str | None = None,
 ) -> dict:
     return render_preview_bundle(
         header_template,
@@ -151,6 +153,8 @@ def preview_notification_templates(
         sms_template,
         preview_title=preview_title or "Pré-visualização",
         brand_primary=brand_primary,
+        brand_primary_foreground=brand_primary_foreground,
+        logo_url=logo_url,
     )
 
 
