@@ -15,6 +15,19 @@ def validate_object_id(tid: str):
         raise ValueError("Invalid template id")
 
 
+def _channels_require_sms(channels: list) -> bool:
+    return "sms" in [str(c).strip().lower() for c in (channels or [])]
+
+
+def _validate_sms_if_needed(channels: list, sms_template: str | None) -> None:
+    if not _channels_require_sms(channels):
+        return
+    if sms_template is None:
+        return
+    if not str(sms_template).strip():
+        raise ValueError("sms_template is required when channel 'sms' is selected")
+
+
 def serialize_template(doc: dict) -> dict:
     out = dict(doc)
     out["_id"] = str(out["_id"])
@@ -22,6 +35,7 @@ def serialize_template(doc: dict) -> dict:
     out["header_template"] = str(out.get("header_template") or "")
     out["body_template"] = str(out.get("body_template") or "")
     out["footer_template"] = str(out.get("footer_template") or "")
+    out["sms_template"] = str(out.get("sms_template") or "")
     return out
 
 
@@ -44,12 +58,16 @@ def create_notification_template(tenant_database: str, data: dict):
     if not isinstance(channels, list) or not channels:
         raise ValueError("At least one channel is required")
 
+    sms_template = str(data.get("sms_template") or "")
+    _validate_sms_if_needed(channels, sms_template)
+
     doc = {
         "name": name,
         "channels": channels,
         "header_template": str(data.get("header_template") or ""),
         "body_template": str(data.get("body_template") or ""),
         "footer_template": str(data.get("footer_template") or ""),
+        "sms_template": sms_template,
         "created_at": now_brasilia(),
         "updated_at": now_brasilia(),
     }
@@ -70,7 +88,8 @@ def get_notification_template_by_id(tenant_database: str, template_id: str):
 def update_notification_template(tenant_database: str, template_id: str, data: dict):
     db = get_tenant_db(tenant_database)
     oid = validate_object_id(template_id)
-    if not db[COLLECTION].find_one({"_id": oid}):
+    current = db[COLLECTION].find_one({"_id": oid})
+    if not current:
         raise ValueError("Template not found")
 
     for f in ["_id", "created_at"]:
@@ -81,9 +100,14 @@ def update_notification_template(tenant_database: str, template_id: str, data: d
         if not data["name"]:
             raise ValueError("Name cannot be empty")
 
-    for key in ("header_template", "body_template", "footer_template"):
+    for key in ("header_template", "body_template", "footer_template", "sms_template"):
         if key in data and data[key] is not None:
             data[key] = str(data[key])
+
+    merged_channels = data.get("channels", current.get("channels") or [])
+    merged_sms = data.get("sms_template", current.get("sms_template", ""))
+    if "sms_template" in data or "channels" in data:
+        _validate_sms_if_needed(merged_channels, merged_sms)
 
     if "channels" in data:
         ch = data["channels"]
@@ -115,14 +139,18 @@ def preview_notification_templates(
     header_template: str,
     body_template: str,
     footer_template: str,
+    sms_template: str,
     *,
     preview_title: str = "Pré-visualização",
+    brand_primary: str | None = None,
 ) -> dict:
     return render_preview_bundle(
         header_template,
         body_template,
         footer_template,
+        sms_template,
         preview_title=preview_title or "Pré-visualização",
+        brand_primary=brand_primary,
     )
 
 
@@ -134,7 +162,9 @@ def test_pwa_payload(tenant_database: str, template_id: str) -> dict:
         doc.get("header_template") or "",
         doc.get("body_template") or "",
         doc.get("footer_template") or "",
+        doc.get("sms_template") or "",
         preview_title=doc.get("name") or "Notificação",
+        brand_primary=None,
     )
     pwa = bundle.get("pwa") or {}
     return {

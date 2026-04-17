@@ -9,6 +9,10 @@ class NotificationTemplateCreate(BaseModel):
     header_template: str = ""
     body_template: str = ""
     footer_template: str = ""
+    sms_template: str = Field(
+        default="",
+        description="Texto curto só para SMS (Jinja2). Ex.: {{ link_curto }}",
+    )
 
     @field_validator("channels")
     @classmethod
@@ -33,6 +37,7 @@ class NotificationTemplateUpdate(BaseModel):
     header_template: str | None = None
     body_template: str | None = None
     footer_template: str | None = None
+    sms_template: str | None = None
 
     @field_validator("channels")
     @classmethod
@@ -57,4 +62,9 @@ class NotificationPreviewBody(BaseModel):
     header_template: str = ""
     body_template: str = ""
     footer_template: str = ""
+    sms_template: str = ""
     preview_title: str = "Pré-visualização"
+    brand_primary: str | None = Field(
+        default=None,
+        description="Cor principal do tenant (#hex ou hsl(...)) para o e-mail.",
+    )

@@ -61,7 +61,9 @@ async def preview_template_route(
             body.header_template,
             body.body_template,
             body.footer_template,
+            body.sms_template,
             preview_title=body.preview_title,
+            brand_primary=body.brand_primary,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
