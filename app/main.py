@@ -8,6 +8,7 @@ from app.routes import (
     tenant_teams,
     tenant_lists,
     tenant_questionnaires,
+    tenant_notification_templates,
     auth,
 )
 
@@ -67,6 +68,12 @@ app.include_router(
     tenant_questionnaires.router,
     prefix="/tenants",
     tags=["Tenant Questionnaires"],
+)
+
+app.include_router(
+    tenant_notification_templates.router,
+    prefix="/tenants",
+    tags=["Tenant Notification Templates"],
 )
 
 app.include_router(
