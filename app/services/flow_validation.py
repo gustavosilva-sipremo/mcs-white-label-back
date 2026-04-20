@@ -363,6 +363,60 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     loader=tenant_list_service.get_generic_list_by_id,
                 )
 
+            vp_raw = cfg.get("valuePath")
+            brules = cfg.get("branchRules")
+            def_bk_raw = cfg.get("defaultBranchKey")
+            vp_s = str(vp_raw).strip() if vp_raw is not None else ""
+            has_routing = bool(vp_s) or brules is not None
+
+            if has_routing:
+                if not vp_s:
+                    raise ValueError(
+                        f"Node {nid}: gateway valuePath is required when branch "
+                        "routing is configured",
+                    )
+                if len(vp_s) > 200:
+                    raise ValueError(
+                        f"Node {nid}: gateway valuePath must be at most 200 characters",
+                    )
+                if not isinstance(brules, list) or len(brules) == 0:
+                    raise ValueError(
+                        f"Node {nid}: gateway branchRules must be a non-empty list when "
+                        "routing is configured",
+                    )
+                bk_pat = re.compile(r"^[a-zA-Z0-9_-]+$")
+                seen_when_lower: set[str] = set()
+                for i, rule in enumerate(brules):
+                    if not isinstance(rule, dict):
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}] must be an object",
+                        )
+                    wv = str(rule.get("whenValue", "")).strip()
+                    bk = str(rule.get("branchKey", "")).strip()
+                    if not wv:
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}].whenValue is required",
+                        )
+                    if not bk or not bk_pat.match(bk):
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}].branchKey must be "
+                            "non-empty and contain only letters, digits, hyphen and underscore",
+                        )
+                    wl = wv.lower()
+                    if wl in seen_when_lower:
+                        raise ValueError(
+                            f"Node {nid}: duplicate gateway branchRules whenValue "
+                            f"(case-insensitive): {wv!r}",
+                        )
+                    seen_when_lower.add(wl)
+                if def_bk_raw is not None:
+                    ds = str(def_bk_raw).strip()
+                    if ds and not bk_pat.match(ds):
+                        raise ValueError(
+                            f"Node {nid}: gateway defaultBranchKey may contain only "
+                            "letters, digits, hyphen and underscore",
+                        )
+
     seen_branch: dict[str, str] = {}
     for nid, bk in trigger_branch_rows:
         if bk in seen_branch:
