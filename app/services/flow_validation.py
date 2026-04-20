@@ -24,6 +24,8 @@ INTERMEDIATE_TYPES = frozenset(
 )
 ALL_BLOCK_TYPES = STRUCTURAL_TYPES | INTERMEDIATE_TYPES
 
+NOTIFICATION_BLOCK_CHANNELS = frozenset({"email", "sms", "whatsapp", "pwa"})
+
 
 def _node_block_type(node: dict) -> str | None:
     data = node.get("data")
@@ -299,6 +301,41 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     kind=f"Node {nid} templateRef",
                     loader=notification_template_service.get_notification_template_by_id,
                 )
+                template_doc = (
+                    notification_template_service.get_notification_template_by_id(
+                        tenant_database,
+                        str(ref.get("id", "")).strip(),
+                    )
+                )
+                ch_raw = cfg.get("channels")
+                if not isinstance(ch_raw, list) or len(ch_raw) == 0:
+                    raise ValueError(
+                        f"Node {nid}: notification config.channels must be a non-empty "
+                        "list when templateRef is set",
+                    )
+                tmpl_channels = {
+                    str(x).strip().lower()
+                    for x in (template_doc.get("channels") or [])
+                }
+                seen_ch: set[str] = set()
+                for i, c in enumerate(ch_raw):
+                    s = str(c).strip().lower()
+                    if s not in NOTIFICATION_BLOCK_CHANNELS:
+                        raise ValueError(
+                            f"Node {nid}: notification channels[{i}] must be one of "
+                            f"email, sms, whatsapp, pwa (got {c!r})",
+                        )
+                    if s not in tmpl_channels:
+                        raise ValueError(
+                            f"Node {nid}: notification channel {s!r} is not enabled on "
+                            "the selected template",
+                        )
+                    seen_ch.add(s)
+                if not seen_ch:
+                    raise ValueError(
+                        f"Node {nid}: notification channels must include at least one "
+                        "valid channel",
+                    )
             for key, loader in (
                 ("recipientUserRefs", user_service.get_user_by_id),
                 ("recipientTeamRefs", team_service.get_team_by_id),
