@@ -336,9 +336,39 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                         f"Node {nid}: notification channels must include at least one "
                         "valid channel",
                     )
+            tc = cfg.get("triggerCondition")
+            if tc is not None:
+                if not isinstance(tc, dict):
+                    raise ValueError(
+                        f"Node {nid}: notification triggerCondition must be an object",
+                    )
+                vp = str(tc.get("valuePath", "")).strip()
+                mv = str(tc.get("matchValue", "")).strip()
+                if bool(vp) ^ bool(mv):
+                    raise ValueError(
+                        f"Node {nid}: notification triggerCondition requires both "
+                        "valuePath and matchValue when set",
+                    )
+                if vp or mv:
+                    if len(vp) > 200:
+                        raise ValueError(
+                            f"Node {nid}: notification triggerCondition.valuePath "
+                            "must be at most 200 characters",
+                        )
+                    if len(mv) > 500:
+                        raise ValueError(
+                            f"Node {nid}: notification triggerCondition.matchValue "
+                            "must be at most 500 characters",
+                        )
+            afc = cfg.get("advanceFlowCompass")
+            if afc is not None and not isinstance(afc, bool):
+                raise ValueError(
+                    f"Node {nid}: notification advanceFlowCompass must be a boolean",
+                )
             for key, loader in (
                 ("recipientUserRefs", user_service.get_user_by_id),
                 ("recipientTeamRefs", team_service.get_team_by_id),
+                ("recipientListRefs", tenant_list_service.get_generic_list_by_id),
             ):
                 arr = cfg.get(key)
                 if arr is None:
@@ -484,6 +514,8 @@ def build_blocks_index(
                 _append_ref(refs, nid, "recipientUserRefs", item)
             for item in cfg.get("recipientTeamRefs") or []:
                 _append_ref(refs, nid, "recipientTeamRefs", item)
+            for item in cfg.get("recipientListRefs") or []:
+                _append_ref(refs, nid, "recipientListRefs", item)
         if bt == "gateway":
             _append_ref(refs, nid, "listRef", cfg.get("listRef"))
 

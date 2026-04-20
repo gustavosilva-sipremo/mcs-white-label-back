@@ -88,6 +88,73 @@ class TestNotificationBlockValidation(unittest.TestCase):
         ]
         validate_block_configs("tenant", nodes)
 
+    @patch(
+        "app.services.flow_validation.notification_template_service.get_notification_template_by_id",
+    )
+    def test_trigger_condition_requires_both_fields(self, mock_get):
+        tid = "507f1f77bcf86cd799439011"
+        mock_get.return_value = _template_doc(tid, ["email"])
+        nodes = [
+            _node(
+                "n1",
+                "notification",
+                "N",
+                {
+                    "templateRef": {"id": tid},
+                    "channels": ["email"],
+                    "triggerCondition": {"valuePath": "x", "matchValue": ""},
+                },
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "triggerCondition requires both"):
+            validate_block_configs("tenant", nodes)
+
+    @patch(
+        "app.services.flow_validation.notification_template_service.get_notification_template_by_id",
+    )
+    @patch(
+        "app.services.flow_validation.tenant_list_service.get_generic_list_by_id",
+    )
+    def test_recipient_list_refs(self, mock_list, mock_get):
+        tid = "507f1f77bcf86cd799439011"
+        lid = "607f1f77bcf86cd799439012"
+        mock_get.return_value = _template_doc(tid, ["email"])
+        mock_list.return_value = {"_id": lid, "name": "L"}
+        nodes = [
+            _node(
+                "n1",
+                "notification",
+                "N",
+                {
+                    "templateRef": {"id": tid},
+                    "channels": ["email"],
+                    "recipientListRefs": [{"id": lid}],
+                },
+            ),
+        ]
+        validate_block_configs("tenant", nodes)
+
+    @patch(
+        "app.services.flow_validation.notification_template_service.get_notification_template_by_id",
+    )
+    def test_advance_flow_compass_must_be_boolean(self, mock_get):
+        tid = "507f1f77bcf86cd799439011"
+        mock_get.return_value = _template_doc(tid, ["email"])
+        nodes = [
+            _node(
+                "n1",
+                "notification",
+                "N",
+                {
+                    "templateRef": {"id": tid},
+                    "channels": ["email"],
+                    "advanceFlowCompass": "yes",
+                },
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "advanceFlowCompass must be a boolean"):
+            validate_block_configs("tenant", nodes)
+
 
 if __name__ == "__main__":
     unittest.main()
