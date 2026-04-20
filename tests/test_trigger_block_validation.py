@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app.services.flow_validation import validate_block_configs
 
@@ -78,6 +79,51 @@ class TestTriggerBlockValidation(unittest.TestCase):
             ),
         ]
         validate_block_configs("tenant", nodes)
+
+    @patch(
+        "app.services.flow_validation.questionnaire_service.get_questionnaire_by_id",
+    )
+    def test_customizable_questionnaire_id_without_fields(self, mock_get):
+        qid = "507f1f77bcf86cd799439011"
+        mock_get.return_value = {"_id": qid}
+        nodes = [
+            _node(
+                "t",
+                "trigger",
+                "T",
+                {"mode": "customizable", "branchKey": qid},
+            ),
+        ]
+        validate_block_configs("tenant", nodes)
+        mock_get.assert_called_with("tenant", qid)
+
+    def test_duplicate_trigger_branch_key(self):
+        nodes = [
+            _node("t1", "trigger", "T1", {"mode": "preset", "branchKey": "dup"}),
+            _node("t2", "trigger", "T2", {"mode": "preset", "branchKey": "dup"}),
+        ]
+        with self.assertRaisesRegex(ValueError, "Duplicate trigger branchKey"):
+            validate_block_configs("tenant", nodes)
+
+    @patch(
+        "app.services.flow_validation.questionnaire_service.get_questionnaire_by_id",
+    )
+    def test_trigger_object_id_branch_resolves_questionnaire(self, mock_get):
+        qid = "507f1f77bcf86cd799439011"
+        mock_get.return_value = {"_id": qid}
+        nodes = [_node("t", "trigger", "T", {"mode": "preset", "branchKey": qid})]
+        validate_block_configs("tenant", nodes)
+        mock_get.assert_called_once_with("tenant", qid)
+
+    @patch(
+        "app.services.flow_validation.questionnaire_service.get_questionnaire_by_id",
+    )
+    def test_trigger_object_id_branch_missing_questionnaire(self, mock_get):
+        qid = "507f1f77bcf86cd799439011"
+        mock_get.side_effect = ValueError("Questionnaire not found")
+        nodes = [_node("t", "trigger", "T", {"mode": "preset", "branchKey": qid})]
+        with self.assertRaisesRegex(ValueError, "Questionnaire not found"):
+            validate_block_configs("tenant", nodes)
 
 
 if __name__ == "__main__":

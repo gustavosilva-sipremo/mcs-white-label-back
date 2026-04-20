@@ -7,6 +7,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
 from app.services import (
     questionnaire_service,
     notification_template_service,
@@ -175,6 +178,7 @@ def _validate_ref_object(
 
 def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> None:
     """Validate known config references against tenant collections."""
+    trigger_branch_rows: list[tuple[str, str]] = []
     for node in logic_nodes:
         nid = str(node.get("id", "?"))
         data = node.get("data")
@@ -209,6 +213,21 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     f"Node {nid}: trigger branchKey may contain only letters, "
                     "digits, hyphen and underscore",
                 )
+            try:
+                ObjectId(branch_key)
+            except InvalidId:
+                pass
+            else:
+                try:
+                    questionnaire_service.get_questionnaire_by_id(
+                        tenant_database,
+                        branch_key,
+                    )
+                except ValueError as e:
+                    raise ValueError(
+                        f"Node {nid}: trigger branchKey (questionnaire id): {e}",
+                    ) from e
+            trigger_branch_rows.append((nid, branch_key))
             home_cta = cfg.get("homeCtaLabel")
             if home_cta is not None and len(str(home_cta)) > 200:
                 raise ValueError(
@@ -220,39 +239,46 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     f"Node {nid}: trigger summary must be at most 300 characters",
                 )
             if m_final == "customizable":
-                fields = cfg.get("fields")
-                if not isinstance(fields, list) or len(fields) == 0:
-                    raise ValueError(
-                        f"Node {nid}: customizable trigger requires config.fields "
-                        "with at least one field",
-                    )
-                key_pat = re.compile(r"^[a-z][a-z0-9_]*$")
-                for i, field in enumerate(fields):
-                    if not isinstance(field, dict):
+                try:
+                    ObjectId(branch_key)
+                    form_questionnaire_branch = True
+                except InvalidId:
+                    form_questionnaire_branch = False
+
+                if not form_questionnaire_branch:
+                    fields = cfg.get("fields")
+                    if not isinstance(fields, list) or len(fields) == 0:
                         raise ValueError(
-                            f"Node {nid}: trigger fields[{i}] must be an object",
+                            f"Node {nid}: customizable trigger (non-questionnaire "
+                            "branchKey) requires config.fields with at least one field",
                         )
-                    fk = str(field.get("key", "")).strip()
-                    fl = str(field.get("label", "")).strip()
-                    if not fk or not key_pat.match(fk):
-                        raise ValueError(
-                            f"Node {nid}: trigger fields[{i}].key must be "
-                            "snake_case starting with a letter (a-z)",
-                        )
-                    if not fl:
-                        raise ValueError(
-                            f"Node {nid}: trigger fields[{i}].label is required",
-                        )
-                    ft = field.get("type")
-                    if ft is not None and str(ft).strip().lower() not in (
-                        "text",
-                        "textarea",
-                        "number",
-                    ):
-                        raise ValueError(
-                            f"Node {nid}: trigger fields[{i}].type must be "
-                            "text, textarea, or number when set",
-                        )
+                    key_pat = re.compile(r"^[a-z][a-z0-9_]*$")
+                    for i, field in enumerate(fields):
+                        if not isinstance(field, dict):
+                            raise ValueError(
+                                f"Node {nid}: trigger fields[{i}] must be an object",
+                            )
+                        fk = str(field.get("key", "")).strip()
+                        fl = str(field.get("label", "")).strip()
+                        if not fk or not key_pat.match(fk):
+                            raise ValueError(
+                                f"Node {nid}: trigger fields[{i}].key must be "
+                                "snake_case starting with a letter (a-z)",
+                            )
+                        if not fl:
+                            raise ValueError(
+                                f"Node {nid}: trigger fields[{i}].label is required",
+                            )
+                        ft = field.get("type")
+                        if ft is not None and str(ft).strip().lower() not in (
+                            "text",
+                            "textarea",
+                            "number",
+                        ):
+                            raise ValueError(
+                                f"Node {nid}: trigger fields[{i}].type must be "
+                                "text, textarea, or number when set",
+                            )
 
         if bt == "data":
             ref = cfg.get("formRef")
@@ -299,6 +325,15 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     kind=f"Node {nid} listRef",
                     loader=tenant_list_service.get_generic_list_by_id,
                 )
+
+    seen_branch: dict[str, str] = {}
+    for nid, bk in trigger_branch_rows:
+        if bk in seen_branch:
+            raise ValueError(
+                f"Duplicate trigger branchKey '{bk}' on nodes "
+                f"'{seen_branch[bk]}' and '{nid}'",
+            )
+        seen_branch[bk] = nid
 
 
 def _append_ref(
