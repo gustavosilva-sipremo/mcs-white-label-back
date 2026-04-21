@@ -154,6 +154,36 @@ def validate_flow_graph_structure(graph: dict) -> tuple[str, str, list[dict]]:
     return start_id, end_id, logic_nodes
 
 
+def _validate_interaction_auth(
+    tenant_database: str,
+    node_label: str,
+    cfg: dict,
+) -> None:
+    """Optional allowedUserRef / allowedTeamRef (mutually exclusive) on data & trigger."""
+    u = cfg.get("allowedUserRef")
+    t = cfg.get("allowedTeamRef")
+    if u is None and t is None:
+        return
+    if u is not None and t is not None:
+        raise ValueError(
+            f"{node_label}: allowedUserRef and allowedTeamRef are mutually exclusive",
+        )
+    if u is not None:
+        _validate_ref_object(
+            tenant_database,
+            u,
+            kind=f"{node_label} allowedUserRef",
+            loader=user_service.get_user_by_id,
+        )
+    if t is not None:
+        _validate_ref_object(
+            tenant_database,
+            t,
+            kind=f"{node_label} allowedTeamRef",
+            loader=team_service.get_team_by_id,
+        )
+
+
 def _validate_ref_object(
     tenant_database: str,
     ref: Any,
@@ -281,6 +311,7 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                                 f"Node {nid}: trigger fields[{i}].type must be "
                                 "text, textarea, or number when set",
                             )
+            _validate_interaction_auth(tenant_database, f"Node {nid}", cfg)
 
         if bt == "data":
             ref = cfg.get("formRef")
@@ -291,6 +322,7 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     kind=f"Node {nid} formRef",
                     loader=questionnaire_service.get_questionnaire_by_id,
                 )
+            _validate_interaction_auth(tenant_database, f"Node {nid}", cfg)
 
         if bt == "notification":
             ref = cfg.get("templateRef")
@@ -506,8 +538,12 @@ def build_blocks_index(
                     "fieldCount": field_count,
                 },
             )
+            _append_ref(refs, nid, "allowedUserRef", cfg.get("allowedUserRef"))
+            _append_ref(refs, nid, "allowedTeamRef", cfg.get("allowedTeamRef"))
         if bt == "data":
             _append_ref(refs, nid, "formRef", cfg.get("formRef"))
+            _append_ref(refs, nid, "allowedUserRef", cfg.get("allowedUserRef"))
+            _append_ref(refs, nid, "allowedTeamRef", cfg.get("allowedTeamRef"))
         if bt == "notification":
             _append_ref(refs, nid, "templateRef", cfg.get("templateRef"))
             for item in cfg.get("recipientUserRefs") or []:
