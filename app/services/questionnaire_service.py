@@ -23,7 +23,7 @@ def _validate_list_references(tenant_database: str, questions: list) -> None:
         if not isinstance(q, dict):
             continue
         qtype = q.get("type")
-        if qtype not in ("single", "multiple"):
+        if qtype not in ("single", "multiple", "cards"):
             continue
         mode = q.get("optionsMode") or "manual"
         if mode != "list":
