@@ -377,11 +377,6 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                             f"Node {nid}: notification triggerCondition.matchValue "
                             "must be at most 500 characters",
                         )
-            afc = cfg.get("advanceFlowCompass")
-            if afc is not None and not isinstance(afc, bool):
-                raise ValueError(
-                    f"Node {nid}: notification advanceFlowCompass must be a boolean",
-                )
             for key, loader in (
                 ("recipientUserRefs", user_service.get_user_by_id),
                 ("recipientTeamRefs", team_service.get_team_by_id),

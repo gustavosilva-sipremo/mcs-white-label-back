@@ -134,27 +134,6 @@ class TestNotificationBlockValidation(unittest.TestCase):
         ]
         validate_block_configs("tenant", nodes)
 
-    @patch(
-        "app.services.flow_validation.notification_template_service.get_notification_template_by_id",
-    )
-    def test_advance_flow_compass_must_be_boolean(self, mock_get):
-        tid = "507f1f77bcf86cd799439011"
-        mock_get.return_value = _template_doc(tid, ["email"])
-        nodes = [
-            _node(
-                "n1",
-                "notification",
-                "N",
-                {
-                    "templateRef": {"id": tid},
-                    "channels": ["email"],
-                    "advanceFlowCompass": "yes",
-                },
-            ),
-        ]
-        with self.assertRaisesRegex(ValueError, "advanceFlowCompass must be a boolean"):
-            validate_block_configs("tenant", nodes)
-
 
 if __name__ == "__main__":
     unittest.main()
