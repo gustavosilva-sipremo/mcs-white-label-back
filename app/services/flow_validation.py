@@ -532,6 +532,7 @@ def build_blocks_index(
                 "branchKey": cfg.get("branchKey"),
                 "label": data.get("label"),
                 "homeCtaLabel": cfg.get("homeCtaLabel"),
+                "homeIcon": cfg.get("homeIcon"),
                 "summary": cfg.get("summary"),
                 "fieldCount": field_count,
             }

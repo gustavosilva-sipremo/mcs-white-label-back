@@ -10,6 +10,18 @@ router = APIRouter(
 )
 
 
+@router.get("")
+async def list_flow_instances_route(
+    tenant_database: str,
+    _user=Depends(require_user_same_tenant),
+):
+    try:
+        items = flow_instance_service.list_active_flow_instances(tenant_database)
+        return {"tenant": tenant_database, "instances": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @router.post("")
 async def create_flow_instance_route(
     tenant_database: str,
@@ -21,24 +33,41 @@ async def create_flow_instance_route(
             tenant_database,
             entry_branch_key=body.entry_branch_key,
             created_by=str(user["_id"]),
+            acting_user=user,
             client_request_id=body.client_request_id,
         )
         return {"message": "Flow instance created", "instance": inst}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        msg = str(e)
+        low = msg.lower()
+        if "not allowed" in low:
+            raise HTTPException(status_code=403, detail=msg) from e
+        raise HTTPException(status_code=400, detail=msg) from e
 
 
 @router.get("/{instance_id}")
 async def get_flow_instance_route(
     tenant_database: str,
     instance_id: str,
-    _user=Depends(require_user_same_tenant),
+    user=Depends(require_user_same_tenant),
 ):
     try:
-        return {"instance": flow_instance_service.get_flow_instance(tenant_database, instance_id)}
+        return {
+            "instance": flow_instance_service.get_flow_instance(
+                tenant_database,
+                instance_id,
+                actor=user,
+            ),
+        }
     except ValueError as e:
         msg = str(e)
-        code = 404 if "not found" in msg.lower() else 400
+        low = msg.lower()
+        if "not found" in low:
+            code = 404
+        elif "not allowed" in low:
+            code = 403
+        else:
+            code = 400
         raise HTTPException(status_code=code, detail=msg) from e
 
 
@@ -47,7 +76,7 @@ async def advance_flow_instance_route(
     tenant_database: str,
     instance_id: str,
     body: FlowInstanceAdvance = Body(default_factory=FlowInstanceAdvance),
-    _user=Depends(require_user_same_tenant),
+    user=Depends(require_user_same_tenant),
 ):
     try:
         payload = body.payload
@@ -55,7 +84,12 @@ async def advance_flow_instance_route(
             tenant_database,
             instance_id,
             payload=payload,
+            acting_user=user,
         )
         return {"message": "Flow instance updated", "instance": inst}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        msg = str(e)
+        low = msg.lower()
+        if "not allowed" in low:
+            raise HTTPException(status_code=403, detail=msg) from e
+        raise HTTPException(status_code=400, detail=msg) from e
