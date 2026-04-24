@@ -562,3 +562,230 @@ def build_blocks_index(
         "entityRefs": refs,
         "intermediateCount": len(logic_nodes),
     }
+
+
+def _node_config_dict(node: dict) -> dict:
+    data = node.get("data")
+    if not isinstance(data, dict):
+        return {}
+    raw = data.get("config")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _collect_trigger_entry_keys(cfg: dict) -> list[str]:
+    keys: list[str] = []
+    bk = str(cfg.get("branchKey", "")).strip()
+    if bk:
+        keys.append(bk)
+    ex = cfg.get("extraBranchKeys")
+    if isinstance(ex, list):
+        for x in ex:
+            s = str(x).strip() if x is not None else ""
+            if s and s not in keys:
+                keys.append(s)
+    return keys
+
+
+def _parse_flow_step_order(raw: Any) -> int | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw == int(raw):
+        return int(raw)
+    if isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def build_execution_plan(logic_nodes: list[dict]) -> dict[str, Any]:
+    """Materialized plan for home/runtime (branch lanes + ordered steps)."""
+    entry_branches: list[dict[str, Any]] = []
+    steps_by_branch: dict[str, list[dict[str, Any]]] = {}
+    gateways: list[dict[str, Any]] = []
+    terminals: list[dict[str, Any]] = []
+    unplaced: list[str] = []
+
+    for node in logic_nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("id", ""))
+        bt = _node_block_type(node)
+        if not bt:
+            continue
+        cfg = _node_config_dict(node)
+        if bt == "trigger":
+            entry_branches.append(
+                {"nodeId": nid, "branchKeys": _collect_trigger_entry_keys(cfg)},
+            )
+            continue
+        if bt in ("data", "notification", "action", "gateway"):
+            fbk = str(cfg.get("flowBranchKey", "")).strip()
+            order = _parse_flow_step_order(cfg.get("flowStepOrder"))
+            if fbk and order is not None:
+                steps_by_branch.setdefault(fbk, []).append(
+                    {"nodeId": nid, "blockType": bt, "order": order},
+                )
+            else:
+                unplaced.append(nid)
+            if bt == "gateway":
+                brules = cfg.get("branchRules")
+                gateways.append(
+                    {
+                        "nodeId": nid,
+                        "valuePath": str(cfg.get("valuePath", "")).strip() or None,
+                        "branchRules": brules if isinstance(brules, list) else None,
+                        "defaultBranchKey": str(cfg.get("defaultBranchKey", "")).strip()
+                        or None,
+                    },
+                )
+            if bt == "action" and str(cfg.get("kind", "")).strip() == "finish_occurrence":
+                terminals.append(
+                    {
+                        "nodeId": nid,
+                        "branchKey": fbk,
+                        "kind": "finish_occurrence",
+                    },
+                )
+            continue
+
+    for _bk, steps in steps_by_branch.items():
+        steps.sort(key=lambda s: (s["order"], s["nodeId"]))
+
+    return {
+        "entryBranches": entry_branches,
+        "stepsByBranch": steps_by_branch,
+        "gateways": gateways,
+        "terminals": terminals,
+        "unplacedNodeIds": unplaced,
+    }
+
+
+def validate_execution_plan_rules(logic_nodes: list[dict]) -> None:
+    """Placement uniqueness and gateway targets vs known branch lanes."""
+    placed: dict[tuple[str, int], str] = {}
+    entry_keys: set[str] = set()
+    step_branch_keys: set[str] = set()
+
+    for node in logic_nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("id", "?"))
+        bt = _node_block_type(node)
+        cfg = _node_config_dict(node)
+        if bt == "trigger":
+            entry_keys.update(_collect_trigger_entry_keys(cfg))
+            continue
+        if bt in ("data", "notification", "action", "gateway"):
+            fbk = str(cfg.get("flowBranchKey", "")).strip()
+            order = _parse_flow_step_order(cfg.get("flowStepOrder"))
+            if fbk and order is not None:
+                key = (fbk, order)
+                if key in placed:
+                    raise ValueError(
+                        f"Duplicate flow placement (flowBranchKey, flowStepOrder) "
+                        f"{key!r} on nodes '{placed[key]}' and '{nid}'",
+                    )
+                placed[key] = nid
+                step_branch_keys.add(fbk)
+
+    known = entry_keys | step_branch_keys
+
+    for node in logic_nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("id", "?"))
+        if _node_block_type(node) != "gateway":
+            continue
+        cfg = _node_config_dict(node)
+        vp_raw = cfg.get("valuePath")
+        brules = cfg.get("branchRules")
+        vp_s = str(vp_raw).strip() if vp_raw is not None else ""
+        has_routing = bool(vp_s) or brules is not None
+        if not has_routing:
+            continue
+        if not isinstance(brules, list):
+            continue
+        for i, rule in enumerate(brules):
+            if not isinstance(rule, dict):
+                continue
+            bk = str(rule.get("branchKey", "")).strip()
+            if bk and bk not in known:
+                raise ValueError(
+                    f"Node {nid}: gateway branchRules[{i}].branchKey {bk!r} "
+                    "must match a trigger entry branch or a flowBranchKey on a placed block",
+                )
+        def_bk = str(cfg.get("defaultBranchKey", "")).strip()
+        if def_bk and def_bk not in known:
+            raise ValueError(
+                f"Node {nid}: gateway defaultBranchKey {def_bk!r} "
+                "must match a trigger entry branch or a flowBranchKey on a placed block",
+            )
+
+    non_trigger = [
+        n
+        for n in logic_nodes
+        if isinstance(n, dict)
+        and _node_block_type(n)
+        and _node_block_type(n) != "trigger"
+    ]
+    if not non_trigger:
+        return
+
+    finish_count = 0
+    for node in logic_nodes:
+        if not isinstance(node, dict):
+            continue
+        if _node_block_type(node) != "action":
+            continue
+        cfg = _node_config_dict(node)
+        if str(cfg.get("kind", "")).strip() == "finish_occurrence":
+            finish_count += 1
+    if finish_count == 0:
+        raise ValueError(
+            "Flow must contain at least one action block with kind "
+            "'finish_occurrence' (terminal step) when non-trigger blocks exist",
+        )
+
+
+def _json_safe_for_plan(value: Any) -> Any:
+    """Recursively convert BSON-ish values for JSON responses."""
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe_for_plan(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_for_plan(x) for x in value]
+    return value
+
+
+def build_nodes_runtime_snapshot(graph: dict) -> dict[str, dict[str, Any]]:
+    """
+    Intermediate flow blocks only: nodeId -> { blockType, label, config }.
+    Used by Home/runtime without shipping the full React Flow graph.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for node in _nodes_list(graph):
+        if not isinstance(node, dict):
+            continue
+        nid = node.get("id")
+        if not nid:
+            continue
+        nid = str(nid)
+        bt = _node_block_type(node)
+        if not bt or bt not in INTERMEDIATE_TYPES:
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        cfg = data.get("config")
+        cfg_out = cfg if isinstance(cfg, dict) else {}
+        out[nid] = _json_safe_for_plan(
+            {
+                "blockType": str(bt),
+                "label": str(data.get("label") or ""),
+                "config": cfg_out,
+            },
+        )
+    return out

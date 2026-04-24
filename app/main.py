@@ -10,6 +10,7 @@ from app.routes import (
     tenant_questionnaires,
     tenant_notification_templates,
     tenant_flows,
+    tenant_flow_instances,
     auth,
 )
 
@@ -81,6 +82,12 @@ app.include_router(
     tenant_flows.router,
     prefix="/tenants",
     tags=["Tenant Flows"],
+)
+
+app.include_router(
+    tenant_flow_instances.router,
+    prefix="/tenants",
+    tags=["Flow Instances"],
 )
 
 app.include_router(

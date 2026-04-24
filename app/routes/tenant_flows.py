@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.dependencies.auth_dependency import require_admin_same_tenant
+from app.dependencies.auth_dependency import (
+    require_admin_same_tenant,
+    require_user_same_tenant,
+)
 from app.models.flow import FlowCreate, FlowUpdate, FlowVersionSave
 from app.services import flow_service
 
@@ -43,6 +46,19 @@ async def create_flow_route(
         return {"message": "Flow created successfully", "flow": doc}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/main/current-plan")
+async def main_flow_current_plan_route(
+    tenant_database: str,
+    _user=Depends(require_user_same_tenant),
+):
+    try:
+        return flow_service.get_main_flow_current_plan(tenant_database)
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg) from e
 
 
 @router.get("/{flow_id}")

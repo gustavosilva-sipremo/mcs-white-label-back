@@ -11,7 +11,10 @@ from app.database.client import get_tenant_db
 from app.utils.datetime_utils import now_brasilia
 from app.services.flow_validation import (
     build_blocks_index,
+    build_execution_plan,
+    build_nodes_runtime_snapshot,
     validate_block_configs,
+    validate_execution_plan_rules,
     validate_flow_graph_structure,
 )
 
@@ -79,6 +82,7 @@ def serialize_version(
         out.pop("graph", None)
     if not include_blocks_index:
         out.pop("blocks_index", None)
+        out.pop("execution_plan", None)
     return out
 
 
@@ -102,7 +106,13 @@ def _prepare_graph(graph: dict | None) -> dict[str, Any]:
 def _validate_and_index(tenant_database: str, graph: dict[str, Any]) -> dict[str, Any]:
     start_id, end_id, logic_nodes = validate_flow_graph_structure(graph)
     validate_block_configs(tenant_database, logic_nodes)
-    return build_blocks_index(graph, start_id, end_id, logic_nodes)
+    validate_execution_plan_rules(logic_nodes)
+    blocks_index = build_blocks_index(graph, start_id, end_id, logic_nodes)
+    execution_plan = build_execution_plan(logic_nodes)
+    return {
+        "blocks_index": blocks_index,
+        "execution_plan": execution_plan,
+    }
 
 
 def list_flows(tenant_database: str) -> list[dict]:
@@ -132,7 +142,7 @@ def create_flow(tenant_database: str, data: dict, created_by: str | None) -> dic
         desc = ""
 
     graph = _prepare_graph(data.get("graph"))
-    blocks_index = _validate_and_index(tenant_database, graph)
+    pack = _validate_and_index(tenant_database, graph)
 
     now = now_brasilia()
     flow_doc = {
@@ -153,7 +163,8 @@ def create_flow(tenant_database: str, data: dict, created_by: str | None) -> dic
         "version": 1,
         "is_current": True,
         "graph": graph,
-        "blocks_index": blocks_index,
+        "blocks_index": pack["blocks_index"],
+        "execution_plan": pack["execution_plan"],
         "created_at": now,
         "created_by": created_by,
     }
@@ -197,6 +208,49 @@ def get_flow_with_current(tenant_database: str, flow_id: str) -> dict:
         include_blocks_index=True,
     )
     return out
+
+
+def get_main_flow_current_plan(tenant_database: str) -> dict[str, Any]:
+    """Main active flow + current version execution_plan (for Home / runtime)."""
+    db = get_tenant_db(tenant_database)
+    flow = db[FLOWS_COLLECTION].find_one(
+        {
+            "is_main": True,
+            "$or": [{"is_active": True}, {"is_active": {"$exists": False}}],
+        },
+    )
+    if not flow:
+        raise ValueError("No main flow found for this tenant")
+    foid = flow["_id"]
+    cur_ver = int(flow.get("current_version") or 1)
+    vdoc = db[VERSIONS_COLLECTION].find_one(
+        {"flow_id": foid, "version": cur_ver, "is_current": True},
+    )
+    if not vdoc:
+        vdoc = db[VERSIONS_COLLECTION].find_one(
+            {"flow_id": foid, "is_current": True},
+        )
+    if not vdoc:
+        raise ValueError("Current flow version not found")
+    exec_plan = vdoc.get("execution_plan")
+    if not isinstance(exec_plan, dict):
+        exec_plan = {}
+    idx = vdoc.get("blocks_index")
+    if not isinstance(idx, dict):
+        idx = {}
+    triggers_full = idx.get("triggers") if isinstance(idx.get("triggers"), list) else []
+    graph = vdoc.get("graph") if isinstance(vdoc.get("graph"), dict) else {}
+    nodes_by_id = build_nodes_runtime_snapshot(graph)
+    return {
+        "tenant": tenant_database,
+        "flow_id": str(flow["_id"]),
+        "flow_name": str(flow.get("name") or ""),
+        "current_version": cur_ver,
+        "execution_plan": exec_plan,
+        "triggers_index": triggers_full,
+        "triggers_meta": exec_plan.get("entryBranches") or [],
+        "nodes_by_id": nodes_by_id,
+    }
 
 
 def list_flow_versions(tenant_database: str, flow_id: str) -> list[dict]:
@@ -257,7 +311,7 @@ def save_new_version(
         raise ValueError("Flow not found")
 
     graph = _prepare_graph(graph)
-    blocks_index = _validate_and_index(tenant_database, graph)
+    pack = _validate_and_index(tenant_database, graph)
 
     now = now_brasilia()
     last = db[VERSIONS_COLLECTION].find_one(
@@ -276,7 +330,8 @@ def save_new_version(
         "version": next_v,
         "is_current": True,
         "graph": graph,
-        "blocks_index": blocks_index,
+        "blocks_index": pack["blocks_index"],
+        "execution_plan": pack["execution_plan"],
         "created_at": now,
         "created_by": created_by,
     }
@@ -307,7 +362,7 @@ def rollback_to_version(
         raise ValueError("Flow version not found")
 
     graph = deepcopy(src.get("graph") or {})
-    blocks_index = _validate_and_index(tenant_database, _prepare_graph(graph))
+    pack = _validate_and_index(tenant_database, _prepare_graph(graph))
 
     now = now_brasilia()
     last = db[VERSIONS_COLLECTION].find_one(
@@ -326,7 +381,8 @@ def rollback_to_version(
         "version": next_v,
         "is_current": True,
         "graph": graph,
-        "blocks_index": blocks_index,
+        "blocks_index": pack["blocks_index"],
+        "execution_plan": pack["execution_plan"],
         "created_at": now,
         "created_by": created_by,
         "rolled_back_from_version": int(version),

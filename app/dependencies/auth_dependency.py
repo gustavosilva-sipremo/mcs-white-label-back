@@ -173,3 +173,18 @@ def require_admin_same_tenant(
         )
 
     return admin_user
+
+
+def require_user_same_tenant(
+    tenant_database: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Any authenticated user; URL tenant must match JWT tenant_database."""
+
+    if tenant_database != current_user.get("tenant_database"):
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant access denied",
+        )
+
+    return current_user
