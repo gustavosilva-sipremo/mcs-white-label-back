@@ -105,6 +105,96 @@ class TestTriggerBlockValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Duplicate trigger branchKey"):
             validate_block_configs("tenant", nodes)
 
+    def test_preset_rejects_extra_branch_keys(self):
+        nodes = [
+            _node(
+                "t",
+                "trigger",
+                "T",
+                {"mode": "preset", "branchKey": "a", "extraBranchKeys": ["b"]},
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "extraBranchKeys is only allowed"):
+            validate_block_configs("tenant", nodes)
+
+    @patch(
+        "app.services.flow_validation.questionnaire_service.get_questionnaire_by_id",
+    )
+    def test_customizable_questionnaire_plus_extra_slugs(self, mock_get):
+        qid = "507f1f77bcf86cd799439011"
+        mock_get.return_value = {"_id": qid}
+        nodes = [
+            _node(
+                "t",
+                "trigger",
+                "T",
+                {
+                    "mode": "customizable",
+                    "branchKey": qid,
+                    "extraBranchKeys": ["ramo_a", "ramo_b"],
+                },
+            ),
+        ]
+        validate_block_configs("tenant", nodes)
+
+    def test_duplicate_across_extra_branch_key(self):
+        nodes = [
+            _node(
+                "t1",
+                "trigger",
+                "T1",
+                {
+                    "mode": "customizable",
+                    "branchKey": "b1",
+                    "fields": [{"key": "a", "label": "A"}],
+                    "extraBranchKeys": ["shared"],
+                },
+            ),
+            _node(
+                "t2",
+                "trigger",
+                "T2",
+                {"mode": "preset", "branchKey": "shared"},
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "Duplicate trigger branchKey"):
+            validate_block_configs("tenant", nodes)
+
+    def test_duplicate_branch_key_and_extra_same_node(self):
+        nodes = [
+            _node(
+                "t",
+                "trigger",
+                "T",
+                {
+                    "mode": "customizable",
+                    "branchKey": "same",
+                    "fields": [{"key": "a", "label": "A"}],
+                    "extraBranchKeys": ["same"],
+                },
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "extraBranchKeys\\[0\\] duplicates branchKey"):
+            validate_block_configs("tenant", nodes)
+
+    def test_at_most_one_customizable_trigger(self):
+        nodes = [
+            _node(
+                "t1",
+                "trigger",
+                "T1",
+                {"mode": "customizable", "branchKey": "b1", "fields": [{"key": "a", "label": "A"}]},
+            ),
+            _node(
+                "t2",
+                "trigger",
+                "T2",
+                {"mode": "customizable", "branchKey": "b2", "fields": [{"key": "c", "label": "C"}]},
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "at most one customizable"):
+            validate_block_configs("tenant", nodes)
+
     @patch(
         "app.services.flow_validation.questionnaire_service.get_questionnaire_by_id",
     )

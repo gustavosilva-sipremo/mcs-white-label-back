@@ -37,64 +37,18 @@ def _node_block_type(node: dict) -> str | None:
     return str(bt).strip().lower()
 
 
-def _edges_list(graph: dict) -> list[dict]:
-    edges = graph.get("edges")
-    return edges if isinstance(edges, list) else []
-
-
 def _nodes_list(graph: dict) -> list[dict]:
     nodes = graph.get("nodes")
     return nodes if isinstance(nodes, list) else []
 
 
-def _build_adjacency(edges: list[dict]) -> dict[str, list[str]]:
-    adj: dict[str, list[str]] = {}
-    for e in edges:
-        if not isinstance(e, dict):
-            continue
-        s = e.get("source")
-        t = e.get("target")
-        if not s or not t:
-            continue
-        s, t = str(s), str(t)
-        adj.setdefault(s, []).append(t)
-    return adj
-
-
-def _build_reverse_adjacency(edges: list[dict]) -> dict[str, list[str]]:
-    radj: dict[str, list[str]] = {}
-    for e in edges:
-        if not isinstance(e, dict):
-            continue
-        s = e.get("source")
-        t = e.get("target")
-        if not s or not t:
-            continue
-        s, t = str(s), str(t)
-        radj.setdefault(t, []).append(s)
-    return radj
-
-
-def _reachable_from(start_id: str, adj: dict[str, list[str]]) -> set[str]:
-    seen: set[str] = set()
-    stack = [start_id]
-    while stack:
-        n = stack.pop()
-        if n in seen:
-            continue
-        seen.add(n)
-        for nb in adj.get(n, []):
-            if nb not in seen:
-                stack.append(nb)
-    return seen
-
-
 def validate_flow_graph_structure(graph: dict) -> tuple[str, str, list[dict]]:
     """
     Returns (start_node_id, end_node_id, logic_nodes) or raises ValueError.
+
+    Edges are not validated for connectivity; they are optional layout hints only.
     """
     nodes = _nodes_list(graph)
-    edges = _edges_list(graph)
 
     start_ids: list[str] = []
     end_ids: list[str] = []
@@ -130,26 +84,6 @@ def validate_flow_graph_structure(graph: dict) -> tuple[str, str, list[dict]]:
 
     start_id = start_ids[0]
     end_id = end_ids[0]
-
-    adj = _build_adjacency(edges)
-    radj = _build_reverse_adjacency(edges)
-
-    forward = _reachable_from(start_id, adj)
-    if end_id not in forward:
-        raise ValueError("End block is not reachable from Start block")
-
-    backward = _reachable_from(end_id, radj)
-    if start_id not in backward:
-        raise ValueError("Start block cannot reach End block through edges")
-
-    all_ids = {str(n.get("id")) for n in nodes if isinstance(n, dict) and n.get("id")}
-    for nid in all_ids:
-        if nid == start_id or nid == end_id:
-            continue
-        if nid not in forward:
-            raise ValueError(f"Orphan node '{nid}': not reachable from Start")
-        if nid not in backward:
-            raise ValueError(f"Orphan node '{nid}': cannot reach End")
 
     return start_id, end_id, logic_nodes
 
@@ -211,6 +145,7 @@ def _validate_ref_object(
 def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> None:
     """Validate known config references against tenant collections."""
     trigger_branch_rows: list[tuple[str, str]] = []
+    customizable_trigger_ids: list[str] = []
     for node in logic_nodes:
         nid = str(node.get("id", "?"))
         data = node.get("data")
@@ -259,7 +194,24 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     raise ValueError(
                         f"Node {nid}: trigger branchKey (questionnaire id): {e}",
                     ) from e
-            trigger_branch_rows.append((nid, branch_key))
+            raw_extras = cfg.get("extraBranchKeys")
+            extra_slugs: list[str] = []
+            if raw_extras is not None:
+                if not isinstance(raw_extras, list):
+                    raise ValueError(
+                        f"Node {nid}: trigger extraBranchKeys must be a list when set",
+                    )
+                for item in raw_extras:
+                    s = str(item).strip() if item is not None else ""
+                    if s:
+                        extra_slugs.append(s)
+
+            if m_final == "preset" and extra_slugs:
+                raise ValueError(
+                    f"Node {nid}: trigger extraBranchKeys is only allowed when "
+                    "mode is 'customizable'",
+                )
+
             home_cta = cfg.get("homeCtaLabel")
             if home_cta is not None and len(str(home_cta)) > 200:
                 raise ValueError(
@@ -311,6 +263,39 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                                 f"Node {nid}: trigger fields[{i}].type must be "
                                 "text, textarea, or number when set",
                             )
+
+                bk_extra_pat = re.compile(r"^[a-zA-Z0-9_-]+$")
+                for j, ek in enumerate(extra_slugs):
+                    if ek == branch_key:
+                        raise ValueError(
+                            f"Node {nid}: extraBranchKeys[{j}] duplicates branchKey",
+                        )
+                    if not bk_extra_pat.fullmatch(ek):
+                        raise ValueError(
+                            f"Node {nid}: extraBranchKeys[{j}] may contain only letters, "
+                            "digits, hyphen and underscore",
+                        )
+                    try:
+                        ObjectId(ek)
+                    except InvalidId:
+                        pass
+                    else:
+                        raise ValueError(
+                            f"Node {nid}: extraBranchKeys[{j}] must be a slug identifier, "
+                            "not an ObjectId",
+                        )
+
+            combined_keys = [branch_key, *extra_slugs]
+            if len(combined_keys) != len(set(combined_keys)):
+                raise ValueError(
+                    f"Node {nid}: duplicate branchKey values among branchKey and "
+                    "extraBranchKeys",
+                )
+            for bk_one in combined_keys:
+                trigger_branch_rows.append((nid, bk_one))
+
+            if m_final == "customizable":
+                customizable_trigger_ids.append(nid)
             _validate_interaction_auth(tenant_database, f"Node {nid}", cfg)
 
         if bt == "data":
@@ -479,6 +464,13 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                             "letters, digits, hyphen and underscore",
                         )
 
+    if len(customizable_trigger_ids) > 1:
+        joined = ", ".join(customizable_trigger_ids)
+        raise ValueError(
+            "Flow may contain at most one customizable trigger block "
+            f"(found: {joined})",
+        )
+
     seen_branch: dict[str, str] = {}
     for nid, bk in trigger_branch_rows:
         if bk in seen_branch:
@@ -527,17 +519,25 @@ def build_blocks_index(
         if bt == "trigger":
             flds = cfg.get("fields")
             field_count = len(flds) if isinstance(flds, list) else 0
-            triggers.append(
-                {
-                    "nodeId": nid,
-                    "mode": cfg.get("mode"),
-                    "branchKey": cfg.get("branchKey"),
-                    "label": data.get("label"),
-                    "homeCtaLabel": cfg.get("homeCtaLabel"),
-                    "summary": cfg.get("summary"),
-                    "fieldCount": field_count,
-                },
-            )
+            extra_raw = cfg.get("extraBranchKeys")
+            extra_list: list[str] = []
+            if isinstance(extra_raw, list):
+                for x in extra_raw:
+                    s = str(x).strip() if x is not None else ""
+                    if s:
+                        extra_list.append(s)
+            row: dict[str, Any] = {
+                "nodeId": nid,
+                "mode": cfg.get("mode"),
+                "branchKey": cfg.get("branchKey"),
+                "label": data.get("label"),
+                "homeCtaLabel": cfg.get("homeCtaLabel"),
+                "summary": cfg.get("summary"),
+                "fieldCount": field_count,
+            }
+            if extra_list:
+                row["extraBranchKeys"] = extra_list
+            triggers.append(row)
             _append_ref(refs, nid, "allowedUserRef", cfg.get("allowedUserRef"))
             _append_ref(refs, nid, "allowedTeamRef", cfg.get("allowedTeamRef"))
         if bt == "data":

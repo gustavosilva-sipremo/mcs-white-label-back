@@ -51,23 +51,26 @@ class TestFlowGraphStructure(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one Start"):
             validate_flow_graph_structure(graph)
 
-    def test_unreachable_end_raises(self):
+    def test_unreachable_end_allowed(self):
+        """Edges are decorative; graph structure does not require a path to End."""
         graph = {
             "nodes": [
                 _node("s", "start"),
-                _node("t", "trigger", "T", {"mode": "preset"}),
+                _node("t", "trigger", "T", {"mode": "preset", "branchKey": "b"}),
                 _node("e", "end"),
             ],
             "edges": [{"id": "1", "source": "s", "target": "t"}],
         }
-        with self.assertRaisesRegex(ValueError, "not reachable from Start"):
-            validate_flow_graph_structure(graph)
+        sid, eid, logic = validate_flow_graph_structure(graph)
+        self.assertEqual(sid, "s")
+        self.assertEqual(eid, "e")
+        self.assertEqual(len(logic), 1)
 
-    def test_orphan_raises(self):
+    def test_orphan_intermediate_allowed(self):
         graph = {
             "nodes": [
                 _node("s", "start"),
-                _node("t", "trigger", "T", {"mode": "preset"}),
+                _node("t", "trigger", "T", {"mode": "preset", "branchKey": "b"}),
                 _node("o", "action", "orphan", {}),
                 _node("e", "end"),
             ],
@@ -76,8 +79,10 @@ class TestFlowGraphStructure(unittest.TestCase):
                 {"id": "2", "source": "t", "target": "e"},
             ],
         }
-        with self.assertRaisesRegex(ValueError, "Orphan node"):
-            validate_flow_graph_structure(graph)
+        sid, eid, logic = validate_flow_graph_structure(graph)
+        self.assertEqual(len(logic), 2)
+        self.assertEqual(sid, "s")
+        self.assertEqual(eid, "e")
 
 
 if __name__ == "__main__":
