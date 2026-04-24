@@ -365,8 +365,12 @@ def create_flow_instance(
         "client_request_id": str(client_request_id).strip() if client_request_id else None,
     }
     ins = db[FLOW_INSTANCES_COLLECTION].insert_one(doc)
-    doc["_id"] = ins.inserted_id
-    return _serialize_instance(doc)
+    oid = ins.inserted_id
+    _create_occurrence_if_needed(db, oid, now)
+    out = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid})
+    if not out:
+        raise ValueError("Failed to load new flow instance")
+    return _serialize_instance(out)
 
 
 def list_active_flow_instances(tenant_database: str, *, limit: int = 100) -> list[dict]:
@@ -517,7 +521,6 @@ def advance_flow_instance(
             )
             nevents = list(doc.get("notification_events") or [])
             nevents.append(nev)
-            _create_occurrence_if_needed(db, oid, now)
 
             next_after = _next_order_after(doc, branch, ord_i)
             if next_after is None:
@@ -567,7 +570,6 @@ def advance_flow_instance(
         )
         nevents = list(doc.get("notification_events") or [])
         nevents.append(nev)
-        _create_occurrence_if_needed(db, oid, now)
 
         next_o = _next_order_after(doc, branch, order)
         if next_o is None:
