@@ -654,6 +654,58 @@ def advance_flow_instance(
     raise ValueError(f"Cannot advance unsupported block type: {block_type!r}")
 
 
+def end_flow_instance_by_user(
+    tenant_database: str,
+    instance_id: str,
+    *,
+    acting_user: dict | None = None,
+) -> dict:
+    """
+    Mark an active instance as completed from the Home card (user chose to end
+    the occurrence without advancing the current compass step).
+    """
+    oid = _validate_object_id(instance_id)
+    db = get_tenant_db(tenant_database)
+    doc = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid})
+    if not doc:
+        raise ValueError("Flow instance not found")
+    if str(doc.get("status")) != "active":
+        raise ValueError("Flow instance is not active")
+
+    assert_user_may_act_on_instance(tenant_database, acting_user, doc)
+
+    compass = doc.get("compass")
+    if not isinstance(compass, dict):
+        raise ValueError("Instance has no compass")
+    branch = str(compass.get("branchKey", "")).strip()
+    order = compass.get("stepOrder")
+    ord_i = int(order) if isinstance(order, int) else -1
+
+    now = now_brasilia()
+    ev = {
+        "type": "occurrence_ended_by_user",
+        "at": now,
+        "branchKey": branch,
+        "order": ord_i,
+        "acting_user": _user_snapshot(acting_user),
+    }
+
+    db[FLOW_INSTANCES_COLLECTION].update_one(
+        {"_id": oid},
+        {
+            "$push": {"events": ev},
+            "$set": {
+                "status": "completed",
+                "ended_at": now,
+                "updated_at": now,
+                "summary.lastEvent": "occurrence_ended_by_user",
+            },
+        },
+    )
+    out = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid})
+    return _serialize_instance(out or {})
+
+
 def get_flow_instance(
     tenant_database: str,
     instance_id: str,

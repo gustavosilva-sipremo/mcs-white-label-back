@@ -45,6 +45,31 @@ async def create_flow_instance_route(
         raise HTTPException(status_code=400, detail=msg) from e
 
 
+@router.patch("/{instance_id}/end")
+async def end_flow_instance_route(
+    tenant_database: str,
+    instance_id: str,
+    user=Depends(require_user_same_tenant),
+):
+    try:
+        inst = flow_instance_service.end_flow_instance_by_user(
+            tenant_database,
+            instance_id,
+            acting_user=user,
+        )
+        return {"message": "Flow instance ended", "instance": inst}
+    except ValueError as e:
+        msg = str(e)
+        low = msg.lower()
+        if "not found" in low:
+            code = 404
+        elif "not allowed" in low:
+            code = 403
+        else:
+            code = 400
+        raise HTTPException(status_code=code, detail=msg) from e
+
+
 @router.get("/{instance_id}")
 async def get_flow_instance_route(
     tenant_database: str,
@@ -93,3 +118,28 @@ async def advance_flow_instance_route(
         if "not allowed" in low:
             raise HTTPException(status_code=403, detail=msg) from e
         raise HTTPException(status_code=400, detail=msg) from e
+
+
+@router.patch("/{instance_id}/end")
+async def end_flow_instance_route(
+    tenant_database: str,
+    instance_id: str,
+    user=Depends(require_user_same_tenant),
+):
+    try:
+        inst = flow_instance_service.end_flow_instance_by_user(
+            tenant_database,
+            instance_id,
+            acting_user=user,
+        )
+        return {"message": "Flow instance ended", "instance": inst}
+    except ValueError as e:
+        msg = str(e)
+        low = msg.lower()
+        if "not found" in low:
+            code = 404
+        elif "not allowed" in low:
+            code = 403
+        else:
+            code = 400
+        raise HTTPException(status_code=code, detail=msg) from e
