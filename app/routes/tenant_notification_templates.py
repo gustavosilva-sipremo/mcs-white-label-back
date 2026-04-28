@@ -5,6 +5,7 @@ from app.models.notification_template import (
     NotificationTemplateCreate,
     NotificationTemplateUpdate,
     NotificationPreviewBody,
+    NotificationTestDispatchBody,
 )
 from app.services.notification_template_service import (
     list_notification_templates,
@@ -15,6 +16,7 @@ from app.services.notification_template_service import (
     preview_notification_templates,
     test_pwa_payload,
 )
+from app.services.notification_dispatch_service import dispatch_template_test
 
 router = APIRouter(
     prefix="/{tenant_database}/notification-templates",
@@ -132,6 +134,37 @@ async def test_pwa_route(
 ):
     try:
         return test_pwa_payload(tenant_database, template_id)
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg)
+
+
+@router.post("/{template_id}/test-dispatch")
+async def test_dispatch_route(
+    tenant_database: str,
+    template_id: str,
+    body: NotificationTestDispatchBody,
+    admin_user=Depends(require_admin_same_tenant),
+):
+    try:
+        return dispatch_template_test(
+            tenant_database=tenant_database,
+            template_id=template_id,
+            channels=body.channels,
+            current_user=admin_user,
+            use_logged_user=body.use_logged_user,
+            manual_targets=[item.model_dump(exclude_none=True) for item in body.manual_targets],
+            preview_title=body.preview_title,
+            channel_templates=(
+                {k: v.model_dump() for k, v in body.channel_templates.items()}
+                if body.channel_templates
+                else None
+            ),
+            brand_primary=body.brand_primary,
+            brand_primary_foreground=body.brand_primary_foreground,
+            logo_url=body.logo_url,
+        )
     except ValueError as e:
         msg = str(e)
         code = 404 if "not found" in msg.lower() else 400

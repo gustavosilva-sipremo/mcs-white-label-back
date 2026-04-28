@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from html import escape, unescape
 
 from jinja2 import TemplateSyntaxError, UndefinedError
@@ -74,12 +75,23 @@ def sanitize_brand_color(value: str | None) -> str:
 def sanitize_logo_url(value: str | None) -> str | None:
     if not value or not isinstance(value, str):
         return None
-    u = value.strip()[:800]
+    u = value.strip()
+    if re.match(r"^data:image/(png|jpeg|jpg|gif|webp);base64,[a-zA-Z0-9+/=\s]+$", u):
+        return u
+    u = u[:800]
     if not re.match(r"^https?://", u, re.I):
         return None
     if re.search(r"[\s\"'<>]", u):
         return None
     return u
+
+
+def sanitize_sms_text(text: str) -> str:
+    raw = re.sub(r"<[^>]*>?", "", text or "")
+    normalized = unicodedata.normalize("NFD", raw)
+    no_accents = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    ascii_only = re.sub(r"[^\x00-\x7F]", "", no_accents)
+    return re.sub(r"\s+", " ", ascii_only).strip()
 
 
 def _looks_like_html_fragment(s: str) -> bool:
@@ -265,13 +277,6 @@ def wrap_email_document(
               {safe_inner}
             </td>
           </tr>
-          <tr>
-            <td style="padding:10px 16px;background:#f1f5f9;border-top:1px solid #e2e8f0;">
-              <p style="margin:0;font-size:11px;line-height:1.45;color:#94a3b8;">
-                Pré-visualização com dados de exemplo · tema claro.
-              </p>
-            </td>
-          </tr>
         </table>
       </td>
     </tr>
@@ -363,7 +368,7 @@ def render_preview_bundle(
         ),
         context,
     )
-    sms_text = strip_html_to_plain(sms_rendered)
+    sms_text = sanitize_sms_text(strip_html_to_plain(sms_rendered))
 
     toast_title = (preview_title or "Notificação").strip()[:120] or "Notificação"
     pwa_h = render_jinja_fragment(pwa_tpl.get("header_template", ""), context)

@@ -119,3 +119,37 @@ class NotificationPreviewBody(BaseModel):
         default=None,
         description="URL absoluta https do logo do tenant para o cabeçalho do e-mail.",
     )
+
+
+class DispatchManualTarget(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    whatsapp: str | None = None
+
+
+class NotificationTestDispatchBody(BaseModel):
+    channels: list[str] = Field(..., min_length=1)
+    use_logged_user: bool = True
+    manual_targets: list[DispatchManualTarget] = Field(default_factory=list)
+    preview_title: str = "Teste de notificação"
+    channel_templates: dict[str, ChannelSubtemplates] | None = None
+    brand_primary: str | None = None
+    brand_primary_foreground: str | None = None
+    logo_url: str | None = None
+
+    @field_validator("channels")
+    @classmethod
+    def validate_dispatch_channels(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("At least one channel is required")
+        seen: set[str] = set()
+        out: list[str] = []
+        for c in v:
+            s = str(c).strip().lower()
+            if s not in ALLOWED_CHANNELS:
+                raise ValueError(f"Invalid channel: {c}")
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
