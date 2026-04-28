@@ -35,6 +35,7 @@ async def create_flow_instance_route(
             created_by=str(user["_id"]),
             acting_user=user,
             client_request_id=body.client_request_id,
+            trigger_answers=body.trigger_answers,
         )
         return {"message": "Flow instance created", "instance": inst}
     except ValueError as e:

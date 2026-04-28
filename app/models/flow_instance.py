@@ -10,6 +10,10 @@ class FlowInstanceCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     entry_branch_key: str = Field(..., min_length=1, validation_alias="entryBranchKey")
+    trigger_answers: Optional[dict[str, Any]] = Field(
+        default=None,
+        validation_alias="triggerAnswers",
+    )
     client_request_id: Optional[str] = Field(
         default=None,
         validation_alias="clientRequestId",

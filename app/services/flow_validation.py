@@ -42,11 +42,12 @@ def _nodes_list(graph: dict) -> list[dict]:
     return nodes if isinstance(nodes, list) else []
 
 
-def validate_flow_graph_structure(graph: dict) -> tuple[str, str, list[dict]]:
+def validate_flow_graph_structure(graph: dict) -> tuple[str, str | None, list[dict]]:
     """
-    Returns (start_node_id, end_node_id, logic_nodes) or raises ValueError.
+    Returns (start_node_id, end_node_id_or_none, logic_nodes) or raises ValueError.
 
     Edges are not validated for connectivity; they are optional layout hints only.
+    End is optional (visual terminal); flows terminate on finish_occurrence actions.
     """
     nodes = _nodes_list(graph)
 
@@ -79,11 +80,11 @@ def validate_flow_graph_structure(graph: dict) -> tuple[str, str, list[dict]]:
 
     if len(start_ids) != 1:
         raise ValueError("Flow must contain exactly one Start block")
-    if len(end_ids) != 1:
-        raise ValueError("Flow must contain exactly one End block")
+    if len(end_ids) > 1:
+        raise ValueError("Flow must contain at most one End block")
 
     start_id = start_ids[0]
-    end_id = end_ids[0]
+    end_id = end_ids[0] if len(end_ids) == 1 else None
 
     return start_id, end_id, logic_nodes
 
@@ -118,6 +119,62 @@ def _validate_interaction_auth(
         )
 
 
+def _customizable_trigger_answer_keys(
+    tenant_database: str,
+    logic_nodes: list[dict],
+) -> frozenset[str]:
+    """
+    Question ids (questionnaire) or field keys (inline fields) for the
+    single customizable trigger, or empty if none.
+    """
+    cfg: dict[str, Any] | None = None
+    for node in logic_nodes:
+        if _node_block_type(node) != "trigger":
+            continue
+        c = _node_config_dict(node)
+        if str(c.get("mode", "")).strip().lower() != "customizable":
+            continue
+        cfg = c
+        break
+    if cfg is None:
+        return frozenset()
+    bk = str(cfg.get("branchKey", "")).strip()
+    try:
+        ObjectId(bk)
+        oid_ok = True
+    except (InvalidId, TypeError):
+        oid_ok = False
+    if oid_ok:
+        try:
+            qdoc = questionnaire_service.get_questionnaire_by_id(
+                tenant_database,
+                bk,
+            )
+        except ValueError:
+            return frozenset()
+        qs = qdoc.get("questions") if isinstance(qdoc.get("questions"), list) else []
+        out: list[str] = []
+        for q in qs:
+            if not isinstance(q, dict):
+                continue
+            qid = q.get("id") if q.get("id") is not None else q.get("_id")
+            s = str(qid or "").strip()
+            if s:
+                out.append(s)
+        return frozenset(out)
+    fields = cfg.get("fields")
+    if not isinstance(fields, list):
+        return frozenset()
+    keys: list[str] = []
+    for f in fields:
+        if not isinstance(f, dict):
+            continue
+        k = str(f.get("key", "")).strip()
+        if k:
+            keys.append(k)
+    return frozenset(keys)
+
+
 def _validate_ref_object(
     tenant_database: str,
     ref: Any,
@@ -144,6 +201,10 @@ def _validate_ref_object(
 
 def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> None:
     """Validate known config references against tenant collections."""
+    trigger_answer_keys = _customizable_trigger_answer_keys(
+        tenant_database,
+        logic_nodes,
+    )
     trigger_branch_rows: list[tuple[str, str]] = []
     customizable_trigger_ids: list[str] = []
     for node in logic_nodes:
@@ -211,6 +272,11 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     f"Node {nid}: trigger extraBranchKeys is only allowed when "
                     "mode is 'customizable'",
                 )
+            if m_final == "customizable" and extra_slugs:
+                raise ValueError(
+                    f"Node {nid}: customizable trigger must not use extraBranchKeys; "
+                    "define branches with a Gateway block instead",
+                )
 
             home_cta = cfg.get("homeCtaLabel")
             if home_cta is not None and len(str(home_cta)) > 200:
@@ -264,35 +330,7 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                                 "text, textarea, or number when set",
                             )
 
-                bk_extra_pat = re.compile(r"^[a-zA-Z0-9_-]+$")
-                for j, ek in enumerate(extra_slugs):
-                    if ek == branch_key:
-                        raise ValueError(
-                            f"Node {nid}: extraBranchKeys[{j}] duplicates branchKey",
-                        )
-                    if not bk_extra_pat.fullmatch(ek):
-                        raise ValueError(
-                            f"Node {nid}: extraBranchKeys[{j}] may contain only letters, "
-                            "digits, hyphen and underscore",
-                        )
-                    try:
-                        ObjectId(ek)
-                    except InvalidId:
-                        pass
-                    else:
-                        raise ValueError(
-                            f"Node {nid}: extraBranchKeys[{j}] must be a slug identifier, "
-                            "not an ObjectId",
-                        )
-
-            combined_keys = [branch_key, *extra_slugs]
-            if len(combined_keys) != len(set(combined_keys)):
-                raise ValueError(
-                    f"Node {nid}: duplicate branchKey values among branchKey and "
-                    "extraBranchKeys",
-                )
-            for bk_one in combined_keys:
-                trigger_branch_rows.append((nid, bk_one))
+            trigger_branch_rows.append((nid, branch_key))
 
             if m_final == "customizable":
                 customizable_trigger_ids.append(nid)
@@ -409,13 +447,89 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
             brules = cfg.get("branchRules")
             def_bk_raw = cfg.get("defaultBranchKey")
             vp_s = str(vp_raw).strip() if vp_raw is not None else ""
-            has_routing = bool(vp_s) or brules is not None
+            routing_mode = str(cfg.get("routingMode", "")).strip().lower()
+            has_rules = isinstance(brules, list) and len(brules) > 0
+            has_routing = bool(vp_s) or has_rules
 
-            if has_routing:
+            if not has_routing:
+                pass
+            elif routing_mode == "trigger_form" or (
+                routing_mode == ""
+                and has_rules
+                and isinstance(brules, list)
+                and isinstance(brules[0], dict)
+                and str(brules[0].get("sourceQuestionId", "")).strip()
+            ):
+                if routing_mode not in ("", "trigger_form"):
+                    raise ValueError(
+                        f"Node {nid}: gateway routingMode must be 'trigger_form' "
+                        "when using form-based branchRules",
+                    )
+                if not trigger_answer_keys:
+                    raise ValueError(
+                        f"Node {nid}: gateway trigger_form routing requires a "
+                        "customizable trigger with a questionnaire or inline fields",
+                    )
+                if not isinstance(brules, list) or len(brules) == 0:
+                    raise ValueError(
+                        f"Node {nid}: gateway branchRules must be a non-empty list for "
+                        "trigger_form routing",
+                    )
+                bk_pat = re.compile(r"^[a-zA-Z0-9_-]+$")
+                seen_form_sig: set[tuple[str, str, str]] = set()
+                for i, rule in enumerate(brules):
+                    if not isinstance(rule, dict):
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}] must be an object",
+                        )
+                    if str(rule.get("whenValue", "")).strip():
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}] must not use "
+                            "whenValue in trigger_form mode",
+                        )
+                    sq = str(rule.get("sourceQuestionId", "")).strip()
+                    op = str(rule.get("operator", "")).strip().lower()
+                    cmp_raw = rule.get("compareValue")
+                    cmpv = str(cmp_raw).strip() if cmp_raw is not None else ""
+                    bk = str(rule.get("branchKey", "")).strip()
+                    if not sq:
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}].sourceQuestionId "
+                            "is required for trigger_form routing",
+                        )
+                    if sq not in trigger_answer_keys:
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}].sourceQuestionId "
+                            f"{sq!r} is not a field or question on the customizable trigger",
+                        )
+                    if op not in ("eq", "gt", "lt"):
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}].operator must be "
+                            "eq, gt, or lt",
+                        )
+                    if not bk or not bk_pat.match(bk):
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}].branchKey must be "
+                            "non-empty and contain only letters, digits, hyphen and underscore",
+                        )
+                    sig = (sq.lower(), op, cmpv.lower())
+                    if sig in seen_form_sig:
+                        raise ValueError(
+                            f"Node {nid}: duplicate gateway branchRules for "
+                            f"question {sq!r}, operator {op!r}, compareValue {cmpv!r}",
+                        )
+                    seen_form_sig.add(sig)
+                if def_bk_raw is not None:
+                    ds = str(def_bk_raw).strip()
+                    if ds and not bk_pat.match(ds):
+                        raise ValueError(
+                            f"Node {nid}: gateway defaultBranchKey may contain only "
+                            "letters, digits, hyphen and underscore",
+                        )
+            else:
                 if not vp_s:
                     raise ValueError(
-                        f"Node {nid}: gateway valuePath is required when branch "
-                        "routing is configured",
+                        f"Node {nid}: gateway valuePath is required for legacy routing",
                     )
                 if len(vp_s) > 200:
                     raise ValueError(
@@ -424,7 +538,7 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                 if not isinstance(brules, list) or len(brules) == 0:
                     raise ValueError(
                         f"Node {nid}: gateway branchRules must be a non-empty list when "
-                        "routing is configured",
+                        "legacy routing is configured",
                     )
                 bk_pat = re.compile(r"^[a-zA-Z0-9_-]+$")
                 seen_when_lower: set[str] = set()
@@ -432,6 +546,12 @@ def validate_block_configs(tenant_database: str, logic_nodes: list[dict]) -> Non
                     if not isinstance(rule, dict):
                         raise ValueError(
                             f"Node {nid}: gateway branchRules[{i}] must be an object",
+                        )
+                    if str(rule.get("sourceQuestionId", "")).strip():
+                        raise ValueError(
+                            f"Node {nid}: gateway branchRules[{i}] cannot mix "
+                            "sourceQuestionId with legacy whenValue routing; set "
+                            "routingMode to 'trigger_form'",
                         )
                     wv = str(rule.get("whenValue", "")).strip()
                     bk = str(rule.get("branchKey", "")).strip()
@@ -499,7 +619,7 @@ def _append_ref(
 def build_blocks_index(
     graph: dict,
     start_id: str,
-    end_id: str,
+    end_id: str | None,
     logic_nodes: list[dict],
 ) -> dict[str, Any]:
     """Normalized summary for dashboards / future runtime."""
@@ -531,7 +651,10 @@ def build_blocks_index(
                 "summary": cfg.get("summary"),
                 "fieldCount": field_count,
             }
-            if extra_list:
+            if (
+                extra_list
+                and str(cfg.get("mode", "")).strip().lower() != "customizable"
+            ):
                 row["extraBranchKeys"] = extra_list
             triggers.append(row)
             _append_ref(refs, nid, "allowedUserRef", cfg.get("allowedUserRef"))
@@ -569,17 +692,8 @@ def _node_config_dict(node: dict) -> dict:
 
 
 def _collect_trigger_entry_keys(cfg: dict) -> list[str]:
-    keys: list[str] = []
     bk = str(cfg.get("branchKey", "")).strip()
-    if bk:
-        keys.append(bk)
-    ex = cfg.get("extraBranchKeys")
-    if isinstance(ex, list):
-        for x in ex:
-            s = str(x).strip() if x is not None else ""
-            if s and s not in keys:
-                keys.append(s)
-    return keys
+    return [bk] if bk else []
 
 
 def _parse_flow_step_order(raw: Any) -> int | None:
@@ -629,9 +743,19 @@ def build_execution_plan(logic_nodes: list[dict]) -> dict[str, Any]:
                 unplaced.append(nid)
             if bt == "gateway":
                 brules = cfg.get("branchRules")
+                rmode = str(cfg.get("routingMode", "")).strip().lower() or None
+                if (
+                    not rmode
+                    and isinstance(brules, list)
+                    and len(brules) > 0
+                    and isinstance(brules[0], dict)
+                    and str(brules[0].get("sourceQuestionId", "")).strip()
+                ):
+                    rmode = "trigger_form"
                 gateways.append(
                     {
                         "nodeId": nid,
+                        "routingMode": rmode,
                         "valuePath": str(cfg.get("valuePath", "")).strip() or None,
                         "branchRules": brules if isinstance(brules, list) else None,
                         "defaultBranchKey": str(cfg.get("defaultBranchKey", "")).strip()
@@ -700,7 +824,16 @@ def validate_execution_plan_rules(logic_nodes: list[dict]) -> None:
         vp_raw = cfg.get("valuePath")
         brules = cfg.get("branchRules")
         vp_s = str(vp_raw).strip() if vp_raw is not None else ""
-        has_routing = bool(vp_s) or brules is not None
+        has_rules = isinstance(brules, list) and len(brules) > 0
+        routing_mode = str(cfg.get("routingMode", "")).strip().lower()
+        is_trigger_form = routing_mode == "trigger_form" or (
+            routing_mode == ""
+            and has_rules
+            and isinstance(brules, list)
+            and isinstance(brules[0], dict)
+            and str(brules[0].get("sourceQuestionId", "")).strip()
+        )
+        has_routing = bool(vp_s) or has_rules
         if not has_routing:
             continue
         if not isinstance(brules, list):
@@ -713,6 +846,11 @@ def validate_execution_plan_rules(logic_nodes: list[dict]) -> None:
                 raise ValueError(
                     f"Node {nid}: gateway branchRules[{i}].branchKey {bk!r} "
                     "must match a trigger entry branch or a flowBranchKey on a placed block",
+                )
+            if is_trigger_form and not str(rule.get("sourceQuestionId", "")).strip():
+                raise ValueError(
+                    f"Node {nid}: gateway branchRules[{i}] requires sourceQuestionId "
+                    "for trigger_form routing",
                 )
         def_bk = str(cfg.get("defaultBranchKey", "")).strip()
         if def_bk and def_bk not in known:

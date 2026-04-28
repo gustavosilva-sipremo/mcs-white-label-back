@@ -40,22 +40,8 @@ def _default_graph() -> dict[str, Any]:
                 "position": {"x": 260, "y": 40},
                 "data": {"blockType": "start", "label": "Início"},
             },
-            {
-                "id": "end-1",
-                "type": "flowEnd",
-                "position": {"x": 260, "y": 420},
-                "data": {"blockType": "end", "label": "Fim"},
-            },
         ],
-        "edges": [
-            {
-                "id": "e-start-end",
-                "source": "start-1",
-                "target": "end-1",
-                "type": "smoothstep",
-                "animated": True,
-            },
-        ],
+        "edges": [],
     }
 
 

@@ -270,6 +270,243 @@ def _run_notification_step(
     return ev
 
 
+def _normalize_trigger_answers(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        ks = str(k).strip()
+        if ks:
+            out[ks] = v
+    return out
+
+
+def _coerce_float_gateway(x: Any) -> float:
+    if isinstance(x, bool):
+        raise ValueError("non-numeric value")
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip().replace(",", ".")
+    return float(s)
+
+
+def _gateway_match_form_rule(rule: dict, answers: dict[str, Any]) -> bool:
+    qid = str(rule.get("sourceQuestionId", "")).strip()
+    op = str(rule.get("operator", "")).strip().lower()
+    cmp_raw = rule.get("compareValue")
+    cmpv = str(cmp_raw).strip() if cmp_raw is not None else ""
+    if not qid or op not in ("eq", "gt", "lt"):
+        return False
+    got = answers.get(qid)
+    if isinstance(got, dict):
+        got = got.get("value", got.get("answer"))
+    if op == "eq":
+        if got is None:
+            return cmpv == ""
+        return str(got).strip() == cmpv
+    try:
+        left = _coerce_float_gateway(got)
+        right = _coerce_float_gateway(cmpv)
+    except (TypeError, ValueError):
+        return False
+    if op == "gt":
+        return left > right
+    if op == "lt":
+        return left < right
+    return False
+
+
+def _lookup_legacy_path(ctx: dict[str, Any], path: str) -> Any:
+    cur: Any = ctx
+    for part in path.split("."):
+        p = part.strip()
+        if not p:
+            continue
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    return cur
+
+
+def _gateway_resolve_target_branch(
+    cfg: dict[str, Any],
+    answers: dict[str, Any],
+) -> str | None:
+    """First matching rule's branchKey, or None (caller may use defaultBranchKey)."""
+    brules = cfg.get("branchRules")
+    if not isinstance(brules, list) or not brules:
+        return None
+    first = brules[0] if isinstance(brules[0], dict) else {}
+    routing = str(cfg.get("routingMode", "")).strip().lower()
+    is_form = routing == "trigger_form" or bool(
+        str(first.get("sourceQuestionId", "")).strip(),
+    )
+    if is_form:
+        for rule in brules:
+            if not isinstance(rule, dict):
+                continue
+            if not str(rule.get("sourceQuestionId", "")).strip():
+                continue
+            if _gateway_match_form_rule(rule, answers):
+                bk = str(rule.get("branchKey", "")).strip()
+                return bk or None
+        return None
+    vp = str(cfg.get("valuePath", "")).strip()
+    if not vp:
+        return None
+    raw = _lookup_legacy_path(answers, vp)
+    if raw is None:
+        raw = _lookup_legacy_path({"trigger": answers}, vp)
+    needle = str(raw).strip().lower()
+    for rule in brules:
+        if not isinstance(rule, dict):
+            continue
+        wv = str(rule.get("whenValue", "")).strip().lower()
+        bk = str(rule.get("branchKey", "")).strip()
+        if wv and wv == needle and bk:
+            return bk
+    return None
+
+
+def _min_step_order_for_branch(doc: dict, bkey: str) -> int:
+    steps = _steps_for_branch(doc, bkey)
+    if not steps:
+        raise ValueError(f"No steps placed for gateway target branch {bkey!r}")
+    orders = [
+        int(s["order"])
+        for s in steps
+        if isinstance(s, dict) and str(s.get("order", "")).strip() != ""
+    ]
+    if not orders:
+        raise ValueError(f"No step orders for branch {bkey!r}")
+    return min(orders)
+
+
+def _flush_consecutive_notifications(
+    tenant_database: str,
+    db,
+    oid: ObjectId,
+    doc: dict,
+    *,
+    acting_user: dict | None,
+) -> dict:
+    """From doc['compass'], auto-execute consecutive notification steps on same branch."""
+    now = now_brasilia()
+    while True:
+        branch = str(doc["compass"].get("branchKey", "")).strip()
+        order = doc["compass"].get("stepOrder")
+        if not branch or not isinstance(order, int):
+            break
+        st = _step_at_order(doc, branch, order)
+        if not st or str(st.get("blockType") or "").lower() != "notification":
+            break
+        nid = str(st.get("nodeId") or "")
+        ord_i = int(st["order"])
+        assert_user_may_act_on_instance(tenant_database, acting_user, doc)
+        nev = _run_notification_step(
+            tenant_database,
+            db,
+            oid,
+            doc,
+            node_id=nid,
+            order=ord_i,
+            acting_user=acting_user,
+        )
+        nevents = list(doc.get("notification_events") or [])
+        nevents.append(nev)
+
+        next_after = _next_order_after(doc, branch, ord_i)
+        if next_after is None:
+            db[FLOW_INSTANCES_COLLECTION].update_one(
+                {"_id": oid},
+                {
+                    "$push": {"events": nev},
+                    "$set": {
+                        "notification_events": nevents,
+                        "status": "completed",
+                        "ended_at": now,
+                        "compass": doc["compass"],
+                        "updated_at": now,
+                        "summary.lastEvent": "branch_completed",
+                    },
+                },
+            )
+            return db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid}) or doc
+
+        db[FLOW_INSTANCES_COLLECTION].update_one(
+            {"_id": oid},
+            {
+                "$push": {"events": nev},
+                "$set": {
+                    "notification_events": nevents,
+                    "compass": {"branchKey": branch, "stepOrder": next_after},
+                    "updated_at": now,
+                    "summary.lastEvent": "notification_executed",
+                },
+            },
+        )
+        doc = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid}) or doc
+    return doc
+
+
+def _apply_gateway_routing(
+    tenant_database: str,
+    db,
+    oid: ObjectId,
+    doc: dict,
+    *,
+    node_id: str,
+    branch: str,
+    order: int,
+    acting_user: dict | None,
+) -> dict:
+    """Evaluate gateway at current compass; update branch + order; flush notifications."""
+    now = now_brasilia()
+    cfg = _node_cfg(doc, node_id)
+    raw_ans = doc.get("trigger_answers")
+    answers = raw_ans if isinstance(raw_ans, dict) else {}
+    target = _gateway_resolve_target_branch(cfg, answers)
+    if target is None:
+        def_bk = str(cfg.get("defaultBranchKey", "")).strip()
+        if def_bk:
+            target = def_bk
+    if not target:
+        raise ValueError(
+            "Gateway did not match any rule; configure defaultBranchKey or trigger answers",
+        )
+    next_o = _min_step_order_for_branch(doc, target)
+    ev = {
+        "type": "gateway_routed",
+        "at": now,
+        "branchKey": branch,
+        "order": order,
+        "node_id": node_id,
+        "targetBranchKey": target,
+        "targetStepOrder": next_o,
+        "acting_user": _user_snapshot(acting_user),
+    }
+    db[FLOW_INSTANCES_COLLECTION].update_one(
+        {"_id": oid},
+        {
+            "$push": {"events": ev},
+            "$set": {
+                "compass": {"branchKey": target, "stepOrder": next_o},
+                "updated_at": now,
+                "summary.lastEvent": "gateway_routed",
+            },
+        },
+    )
+    doc = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid}) or doc
+    doc["compass"] = {"branchKey": target, "stepOrder": next_o}
+    return _flush_consecutive_notifications(
+        tenant_database,
+        db,
+        oid,
+        doc,
+        acting_user=acting_user,
+    )
+
+
 def create_flow_instance(
     tenant_database: str,
     *,
@@ -277,6 +514,7 @@ def create_flow_instance(
     created_by: str | None,
     acting_user: dict | None,
     client_request_id: str | None = None,
+    trigger_answers: dict[str, Any] | None = None,
 ) -> dict:
     key = str(entry_branch_key).strip()
     if not key:
@@ -335,6 +573,7 @@ def create_flow_instance(
     if not isinstance(nodes_by_id, dict):
         nodes_by_id = {}
 
+    ta_norm = _normalize_trigger_answers(trigger_answers)
     doc = {
         "flow_id": flow_oid,
         "flow_version": ver,
@@ -356,6 +595,7 @@ def create_flow_instance(
         "started_at": now,
         "ended_at": None,
         "triggered_by": _user_snapshot(acting_user),
+        "trigger_answers": _json_safe(ta_norm),
         "data_submissions": [],
         "notification_events": [],
         "occurrence_id": None,
@@ -370,6 +610,24 @@ def create_flow_instance(
     out = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid})
     if not out:
         raise ValueError("Failed to load new flow instance")
+    st0 = _step_at_order(out, key, min_order)
+    if (
+        st0
+        and isinstance(st0, dict)
+        and str(st0.get("blockType") or "").strip().lower() == "gateway"
+    ):
+        nid0 = str(st0.get("nodeId") or "")
+        if nid0:
+            out = _apply_gateway_routing(
+                tenant_database,
+                db,
+                oid,
+                out,
+                node_id=nid0,
+                branch=key,
+                order=min_order,
+                acting_user=acting_user,
+            )
     return _serialize_instance(out)
 
 
@@ -502,61 +760,14 @@ def advance_flow_instance(
         doc = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid}) or doc
         doc["data_submissions"] = submissions
         doc["compass"] = {"branchKey": branch, "stepOrder": next_o}
-
-        while True:
-            st = _step_at_order(doc, branch, doc["compass"]["stepOrder"])
-            if not st or str(st.get("blockType") or "").lower() != "notification":
-                break
-            nid = str(st.get("nodeId") or "")
-            ord_i = int(st["order"])
-            assert_user_may_act_on_instance(tenant_database, acting_user, doc)
-            nev = _run_notification_step(
-                tenant_database,
-                db,
-                oid,
-                doc,
-                node_id=nid,
-                order=ord_i,
-                acting_user=acting_user,
-            )
-            nevents = list(doc.get("notification_events") or [])
-            nevents.append(nev)
-
-            next_after = _next_order_after(doc, branch, ord_i)
-            if next_after is None:
-                db[FLOW_INSTANCES_COLLECTION].update_one(
-                    {"_id": oid},
-                    {
-                        "$push": {"events": nev},
-                        "$set": {
-                            "notification_events": nevents,
-                            "status": "completed",
-                            "ended_at": now,
-                            "compass": doc["compass"],
-                            "updated_at": now,
-                            "summary.lastEvent": "branch_completed",
-                        },
-                    },
-                )
-                doc = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid})
-                return _serialize_instance(doc or {})
-
-            db[FLOW_INSTANCES_COLLECTION].update_one(
-                {"_id": oid},
-                {
-                    "$push": {"events": nev},
-                    "$set": {
-                        "notification_events": nevents,
-                        "compass": {"branchKey": branch, "stepOrder": next_after},
-                        "updated_at": now,
-                        "summary.lastEvent": "notification_executed",
-                    },
-                },
-            )
-            doc = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid}) or doc
-
-        out = db[FLOW_INSTANCES_COLLECTION].find_one({"_id": oid})
-        return _serialize_instance(out or doc)
+        doc = _flush_consecutive_notifications(
+            tenant_database,
+            db,
+            oid,
+            doc,
+            acting_user=acting_user,
+        )
+        return _serialize_instance(doc or {})
 
     if block_type == "notification":
         nev = _run_notification_step(
@@ -649,7 +860,17 @@ def advance_flow_instance(
         return _serialize_instance(doc or {})
 
     if block_type == "gateway":
-        raise ValueError("Gateway steps are not supported on Home runtime yet")
+        out_doc = _apply_gateway_routing(
+            tenant_database,
+            db,
+            oid,
+            doc,
+            node_id=node_id,
+            branch=branch,
+            order=order,
+            acting_user=acting_user,
+        )
+        return _serialize_instance(out_doc or {})
 
     raise ValueError(f"Cannot advance unsupported block type: {block_type!r}")
 

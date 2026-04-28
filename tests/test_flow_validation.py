@@ -66,6 +66,20 @@ class TestFlowGraphStructure(unittest.TestCase):
         self.assertEqual(eid, "e")
         self.assertEqual(len(logic), 1)
 
+    def test_no_end_block_allowed(self):
+        graph = {
+            "nodes": [
+                _node("s", "start"),
+                _node("t", "trigger", "T", {"mode": "preset", "branchKey": "b"}),
+            ],
+            "edges": [],
+        }
+        sid, eid, logic = validate_flow_graph_structure(graph)
+        self.assertEqual(sid, "s")
+        self.assertIsNone(eid)
+        idx = build_blocks_index(graph, sid, eid, logic)
+        self.assertIsNone(idx["endNodeId"])
+
     def test_orphan_intermediate_allowed(self):
         graph = {
             "nodes": [

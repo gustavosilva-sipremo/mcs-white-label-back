@@ -120,7 +120,7 @@ class TestTriggerBlockValidation(unittest.TestCase):
     @patch(
         "app.services.flow_validation.questionnaire_service.get_questionnaire_by_id",
     )
-    def test_customizable_questionnaire_plus_extra_slugs(self, mock_get):
+    def test_customizable_questionnaire_rejects_extra_slugs(self, mock_get):
         qid = "507f1f77bcf86cd799439011"
         mock_get.return_value = {"_id": qid}
         nodes = [
@@ -135,9 +135,10 @@ class TestTriggerBlockValidation(unittest.TestCase):
                 },
             ),
         ]
-        validate_block_configs("tenant", nodes)
+        with self.assertRaisesRegex(ValueError, "must not use extraBranchKeys"):
+            validate_block_configs("tenant", nodes)
 
-    def test_duplicate_across_extra_branch_key(self):
+    def test_duplicate_branch_key_between_triggers(self):
         nodes = [
             _node(
                 "t1",
@@ -145,9 +146,8 @@ class TestTriggerBlockValidation(unittest.TestCase):
                 "T1",
                 {
                     "mode": "customizable",
-                    "branchKey": "b1",
+                    "branchKey": "shared",
                     "fields": [{"key": "a", "label": "A"}],
-                    "extraBranchKeys": ["shared"],
                 },
             ),
             _node(
@@ -160,7 +160,7 @@ class TestTriggerBlockValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Duplicate trigger branchKey"):
             validate_block_configs("tenant", nodes)
 
-    def test_duplicate_branch_key_and_extra_same_node(self):
+    def test_customizable_rejects_extra_branch_keys_even_if_same_as_primary(self):
         nodes = [
             _node(
                 "t",
@@ -174,7 +174,7 @@ class TestTriggerBlockValidation(unittest.TestCase):
                 },
             ),
         ]
-        with self.assertRaisesRegex(ValueError, "extraBranchKeys\\[0\\] duplicates branchKey"):
+        with self.assertRaisesRegex(ValueError, "must not use extraBranchKeys"):
             validate_block_configs("tenant", nodes)
 
     def test_at_most_one_customizable_trigger(self):
