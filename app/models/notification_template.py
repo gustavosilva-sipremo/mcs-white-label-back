@@ -1,17 +1,24 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ALLOWED_CHANNELS: frozenset[str] = frozenset({"email", "sms", "whatsapp", "pwa"})
+
+
+class ChannelSubtemplates(BaseModel):
+    header_template: str = ""
+    body_template: str = ""
+    footer_template: str = ""
 
 
 class NotificationTemplateCreate(BaseModel):
     name: str = Field(..., min_length=1)
     channels: list[str] = Field(..., min_length=1)
+    channel_templates: dict[str, ChannelSubtemplates] | None = None
     header_template: str = ""
     body_template: str = ""
     footer_template: str = ""
     sms_template: str = Field(
         default="",
-        description="Texto curto só para SMS (Jinja2). Ex.: {{ link_curto }}",
+        description="Texto curto legado para SMS. Ex.: {{ link_curto }}",
     )
 
     @field_validator("channels")
@@ -30,10 +37,45 @@ class NotificationTemplateCreate(BaseModel):
                 out.append(s)
         return out
 
+    @model_validator(mode="after")
+    def validate_templates_for_channels(self):
+        # Compat: aceita payload legado, mas exige conteúdo para todos os canais ativos.
+        channel_templates = self.channel_templates or {}
+        for channel in self.channels:
+            tpl = channel_templates.get(channel)
+            if tpl:
+                if not (
+                    tpl.header_template.strip()
+                    and tpl.body_template.strip()
+                    and tpl.footer_template.strip()
+                ):
+                    raise ValueError(
+                        f"channel_templates.{channel} must contain 3 non-empty subtemplates",
+                    )
+                continue
+
+            if channel == "sms":
+                if not self.sms_template.strip():
+                    raise ValueError(
+                        "sms_template is required when channel 'sms' is selected",
+                    )
+                continue
+
+            if not (
+                self.header_template.strip()
+                and self.body_template.strip()
+                and self.footer_template.strip()
+            ):
+                raise ValueError(
+                    f"Missing 3 subtemplates for channel '{channel}'",
+                )
+        return self
+
 
 class NotificationTemplateUpdate(BaseModel):
     name: str | None = None
     channels: list[str] | None = None
+    channel_templates: dict[str, ChannelSubtemplates] | None = None
     header_template: str | None = None
     body_template: str | None = None
     footer_template: str | None = None
@@ -59,6 +101,7 @@ class NotificationTemplateUpdate(BaseModel):
 
 
 class NotificationPreviewBody(BaseModel):
+    channel_templates: dict[str, ChannelSubtemplates] | None = None
     header_template: str = ""
     body_template: str = ""
     footer_template: str = ""

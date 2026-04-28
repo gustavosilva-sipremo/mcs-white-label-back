@@ -6,6 +6,7 @@ from app.utils.datetime_utils import now_brasilia
 from app.utils.notification_render import render_preview_bundle
 
 COLLECTION = "notification_templates"
+SUBTEMPLATE_KEYS = ("header_template", "body_template", "footer_template")
 
 
 def validate_object_id(tid: str):
@@ -15,27 +16,75 @@ def validate_object_id(tid: str):
         raise ValueError("Invalid template id")
 
 
-def _channels_require_sms(channels: list) -> bool:
-    return "sms" in [str(c).strip().lower() for c in (channels or [])]
+def _sanitize_channels(channels: list) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in channels or []:
+        s = str(c).strip().lower()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
 
-def _validate_sms_if_needed(channels: list, sms_template: str | None) -> None:
-    if not _channels_require_sms(channels):
-        return
-    if sms_template is None:
-        return
-    if not str(sms_template).strip():
-        raise ValueError("sms_template is required when channel 'sms' is selected")
+def _normalize_single_channel(payload: dict | None) -> dict[str, str]:
+    source = payload or {}
+    return {key: str(source.get(key) or "") for key in SUBTEMPLATE_KEYS}
+
+
+def _build_channel_templates(data: dict, channels: list[str]) -> dict[str, dict[str, str]]:
+    raw = data.get("channel_templates") or {}
+    out: dict[str, dict[str, str]] = {}
+    for channel in channels:
+        if isinstance(raw, dict) and isinstance(raw.get(channel), dict):
+            out[channel] = _normalize_single_channel(raw.get(channel))
+            continue
+
+        # Fallback legado: principal e sms_template.
+        if channel == "sms":
+            out[channel] = {
+                "header_template": "",
+                "body_template": str(data.get("sms_template") or ""),
+                "footer_template": "",
+            }
+            continue
+
+        out[channel] = {
+            "header_template": str(data.get("header_template") or ""),
+            "body_template": str(data.get("body_template") or ""),
+            "footer_template": str(data.get("footer_template") or ""),
+        }
+    return out
+
+
+def _validate_channel_templates(channels: list[str], channel_templates: dict[str, dict[str, str]]) -> None:
+    for channel in channels:
+        t = channel_templates.get(channel) or {}
+        missing = [k for k in SUBTEMPLATE_KEYS if not str(t.get(k) or "").strip()]
+        if missing:
+            raise ValueError(
+                f"channel_templates.{channel} must contain 3 non-empty subtemplates",
+            )
 
 
 def serialize_template(doc: dict) -> dict:
     out = dict(doc)
     out["_id"] = str(out["_id"])
-    out["channels"] = list(out.get("channels") or [])
-    out["header_template"] = str(out.get("header_template") or "")
-    out["body_template"] = str(out.get("body_template") or "")
-    out["footer_template"] = str(out.get("footer_template") or "")
-    out["sms_template"] = str(out.get("sms_template") or "")
+    out["channels"] = _sanitize_channels(list(out.get("channels") or []))
+    out["channel_templates"] = _build_channel_templates(out, out["channels"])
+
+    # Compat legado para clientes ainda não migrados.
+    email_like = (
+        out["channel_templates"].get("email")
+        or out["channel_templates"].get("whatsapp")
+        or out["channel_templates"].get("pwa")
+        or {"header_template": "", "body_template": "", "footer_template": ""}
+    )
+    sms_tpl = out["channel_templates"].get("sms") or {}
+    out["header_template"] = str(email_like.get("header_template") or "")
+    out["body_template"] = str(email_like.get("body_template") or "")
+    out["footer_template"] = str(email_like.get("footer_template") or "")
+    out["sms_template"] = str(sms_tpl.get("body_template") or "")
     return out
 
 
@@ -54,20 +103,21 @@ def create_notification_template(tenant_database: str, data: dict):
     if not name:
         raise ValueError("Template name is required")
 
-    channels = data.get("channels") or []
+    channels = _sanitize_channels(data.get("channels") or [])
     if not isinstance(channels, list) or not channels:
         raise ValueError("At least one channel is required")
 
-    sms_template = str(data.get("sms_template") or "")
-    _validate_sms_if_needed(channels, sms_template)
+    channel_templates = _build_channel_templates(data, channels)
+    _validate_channel_templates(channels, channel_templates)
 
     doc = {
         "name": name,
         "channels": channels,
+        "channel_templates": channel_templates,
         "header_template": str(data.get("header_template") or ""),
         "body_template": str(data.get("body_template") or ""),
         "footer_template": str(data.get("footer_template") or ""),
-        "sms_template": sms_template,
+        "sms_template": str(data.get("sms_template") or ""),
         "created_at": now_brasilia(),
         "updated_at": now_brasilia(),
     }
@@ -100,19 +150,27 @@ def update_notification_template(tenant_database: str, template_id: str, data: d
         if not data["name"]:
             raise ValueError("Name cannot be empty")
 
-    for key in ("header_template", "body_template", "footer_template", "sms_template"):
+    for key in (
+        "header_template",
+        "body_template",
+        "footer_template",
+        "sms_template",
+    ):
         if key in data and data[key] is not None:
             data[key] = str(data[key])
 
-    merged_channels = data.get("channels", current.get("channels") or [])
-    merged_sms = data.get("sms_template", current.get("sms_template", ""))
-    if "sms_template" in data or "channels" in data:
-        _validate_sms_if_needed(merged_channels, merged_sms)
-
     if "channels" in data:
-        ch = data["channels"]
+        ch = _sanitize_channels(data["channels"])
         if not isinstance(ch, list) or not ch:
             raise ValueError("channels cannot be empty")
+        data["channels"] = ch
+
+    merged = dict(current)
+    merged.update(data)
+    merged_channels = _sanitize_channels(merged.get("channels") or [])
+    merged_templates = _build_channel_templates(merged, merged_channels)
+    _validate_channel_templates(merged_channels, merged_templates)
+    data["channel_templates"] = merged_templates
 
     if not data:
         raise ValueError("No fields provided for update")
@@ -136,21 +194,46 @@ def delete_notification_template(tenant_database: str, template_id: str):
 
 
 def preview_notification_templates(
-    header_template: str,
-    body_template: str,
-    footer_template: str,
-    sms_template: str,
+    channels: list[str] | None = None,
+    channel_templates: dict | None = None,
+    header_template: str = "",
+    body_template: str = "",
+    footer_template: str = "",
+    sms_template: str = "",
     *,
     preview_title: str = "Pré-visualização",
     brand_primary: str | None = None,
     brand_primary_foreground: str | None = None,
     logo_url: str | None = None,
 ) -> dict:
+    channels_list = _sanitize_channels(channels or ["email", "whatsapp", "pwa", "sms"])
+    raw = channel_templates if isinstance(channel_templates, dict) else {}
+    if not raw:
+        raw = {
+            "email": {
+                "header_template": header_template,
+                "body_template": body_template,
+                "footer_template": footer_template,
+            },
+            "whatsapp": {
+                "header_template": header_template,
+                "body_template": body_template,
+                "footer_template": footer_template,
+            },
+            "pwa": {
+                "header_template": header_template,
+                "body_template": body_template,
+                "footer_template": footer_template,
+            },
+            "sms": {
+                "header_template": "",
+                "body_template": sms_template,
+                "footer_template": "",
+            },
+        }
     return render_preview_bundle(
-        header_template,
-        body_template,
-        footer_template,
-        sms_template,
+        channels=channels_list,
+        channel_templates=raw,
         preview_title=preview_title or "Pré-visualização",
         brand_primary=brand_primary,
         brand_primary_foreground=brand_primary_foreground,
@@ -163,10 +246,8 @@ def test_pwa_payload(tenant_database: str, template_id: str) -> dict:
     if "pwa" not in [c.lower() for c in (doc.get("channels") or [])]:
         raise ValueError("Template does not include the pwa channel")
     bundle = render_preview_bundle(
-        doc.get("header_template") or "",
-        doc.get("body_template") or "",
-        doc.get("footer_template") or "",
-        doc.get("sms_template") or "",
+        channels=doc.get("channels") or [],
+        channel_templates=doc.get("channel_templates") or {},
         preview_title=doc.get("name") or "Notificação",
         brand_primary=None,
     )

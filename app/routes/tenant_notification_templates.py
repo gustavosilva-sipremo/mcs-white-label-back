@@ -58,10 +58,18 @@ async def preview_template_route(
 ):
     try:
         return preview_notification_templates(
-            body.header_template,
-            body.body_template,
-            body.footer_template,
-            body.sms_template,
+            channels=None,
+            channel_templates=(
+                body.channel_templates
+                if body.channel_templates is None
+                else {
+                    k: v.model_dump() for k, v in body.channel_templates.items()
+                }
+            ),
+            header_template=body.header_template,
+            body_template=body.body_template,
+            footer_template=body.footer_template,
+            sms_template=body.sms_template,
             preview_title=body.preview_title,
             brand_primary=body.brand_primary,
             brand_primary_foreground=body.brand_primary_foreground,

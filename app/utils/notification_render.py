@@ -298,20 +298,41 @@ def build_inner_html(header: str, body: str, footer: str) -> str:
 
 
 def render_preview_bundle(
-    header_template: str,
-    body_template: str,
-    footer_template: str,
-    sms_template: str,
     *,
+    channels: list[str] | None = None,
+    channel_templates: dict | None = None,
     preview_title: str = "Pré-visualização",
     brand_primary: str | None = None,
     brand_primary_foreground: str | None = None,
     logo_url: str | None = None,
     context: dict | None = None,
 ) -> dict:
-    h = render_jinja_fragment(header_template, context)
-    b = render_jinja_fragment(body_template, context)
-    f = render_jinja_fragment(footer_template, context)
+    enabled_channels = [str(c).strip().lower() for c in (channels or [])]
+    raw_templates = channel_templates if isinstance(channel_templates, dict) else {}
+
+    def pick_channel_template(channel: str) -> dict[str, str]:
+        raw = raw_templates.get(channel) if isinstance(raw_templates, dict) else None
+        if isinstance(raw, dict):
+            return {
+                "header_template": str(raw.get("header_template") or ""),
+                "body_template": str(raw.get("body_template") or ""),
+                "footer_template": str(raw.get("footer_template") or ""),
+            }
+        return {"header_template": "", "body_template": "", "footer_template": ""}
+
+    email_tpl = pick_channel_template("email")
+    whatsapp_tpl = pick_channel_template("whatsapp")
+    pwa_tpl = pick_channel_template("pwa")
+    sms_tpl = pick_channel_template("sms")
+
+    if not any(email_tpl.values()):
+        email_tpl = whatsapp_tpl if any(whatsapp_tpl.values()) else pwa_tpl
+    if not any(pwa_tpl.values()):
+        pwa_tpl = whatsapp_tpl if any(whatsapp_tpl.values()) else email_tpl
+
+    h = render_jinja_fragment(email_tpl.get("header_template", ""), context)
+    b = render_jinja_fragment(email_tpl.get("body_template", ""), context)
+    f = render_jinja_fragment(email_tpl.get("footer_template", ""), context)
 
     h_r = enrich_email_fragment(h)
     b_r = enrich_email_fragment(b)
@@ -332,17 +353,40 @@ def render_preview_bundle(
     )
 
     main_plain = strip_html_to_plain(f"{h_r} {b_r} {f_r}")
-    sms_rendered = render_jinja_fragment(sms_template, context)
+    sms_rendered = render_jinja_fragment(
+        " ".join(
+            [
+                sms_tpl.get("header_template", ""),
+                sms_tpl.get("body_template", ""),
+                sms_tpl.get("footer_template", ""),
+            ],
+        ),
+        context,
+    )
     sms_text = strip_html_to_plain(sms_rendered)
 
     toast_title = (preview_title or "Notificação").strip()[:120] or "Notificação"
-    pwa_body = _pwa_plain_from_body_footer(b, f)
-    if not pwa_body and h:
-        pwa_body = strip_urls_keep_newlines(_fragment_to_plain_multiline(h))[:2000]
+    pwa_h = render_jinja_fragment(pwa_tpl.get("header_template", ""), context)
+    pwa_b = render_jinja_fragment(pwa_tpl.get("body_template", ""), context)
+    pwa_f = render_jinja_fragment(pwa_tpl.get("footer_template", ""), context)
+    pwa_body = _pwa_plain_from_body_footer(pwa_b, pwa_f)
+    if not pwa_body and pwa_h:
+        pwa_body = strip_urls_keep_newlines(_fragment_to_plain_multiline(pwa_h))[:2000]
+
+    whatsapp_h = render_jinja_fragment(whatsapp_tpl.get("header_template", ""), context)
+    whatsapp_b = render_jinja_fragment(whatsapp_tpl.get("body_template", ""), context)
+    whatsapp_f = render_jinja_fragment(whatsapp_tpl.get("footer_template", ""), context)
+    whatsapp_text = strip_html_to_plain(f"{whatsapp_h} {whatsapp_b} {whatsapp_f}")
 
     return {
         "email_html": email_html,
         "sms_text": sms_text,
         "main_plain": main_plain,
+        "whatsapp_text": whatsapp_text,
         "pwa": {"title": toast_title, "body": pwa_body},
+        "channel_templates": {
+            c: pick_channel_template(c)
+            for c in ("email", "whatsapp", "pwa", "sms")
+            if not enabled_channels or c in enabled_channels
+        },
     }
