@@ -10,7 +10,12 @@ from bson.errors import InvalidId
 
 from app.database.client import get_tenant_db
 from app.utils.datetime_utils import now_brasilia
-from app.services import flow_service, questionnaire_service, team_service
+from app.services import flow_service, questionnaire_service, team_service, tenant_list_service, user_service
+from app.services.notification_dispatch_service import (
+    dispatch_template_for_manual_targets_only,
+    normalize_resolved_manual_targets,
+)
+from app.services.notification_template_service import get_notification_template_by_id
 
 FLOW_INSTANCES_COLLECTION = "flow_instances"
 FLOW_OCCURRENCES_COLLECTION = "flow_occurrences"
@@ -106,6 +111,205 @@ def _node_cfg(doc: dict, node_id: str) -> dict[str, Any]:
     return c if isinstance(c, dict) else {}
 
 
+def _lookup_legacy_path(ctx: dict[str, Any], path: str) -> Any:
+    cur: Any = ctx
+    for part in path.split("."):
+        p = part.strip()
+        if not p:
+            continue
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    return cur
+
+
+def _unwrap_answer_leaf(val: Any) -> Any:
+    if isinstance(val, dict):
+        return val.get("value", val.get("answer", val))
+    return val
+
+
+def _notification_condition_context(doc: dict) -> dict[str, Any]:
+    """Flat context for triggerCondition valuePath lookups (trigger + answers from latest submission)."""
+    ctx: dict[str, Any] = {}
+    trig = doc.get("trigger_answers")
+    if isinstance(trig, dict):
+        ctx["trigger"] = trig
+        for k, v in trig.items():
+            ctx[str(k)] = _unwrap_answer_leaf(v)
+    merged_answers: dict[str, Any] = {}
+    subs = doc.get("data_submissions") or []
+    if isinstance(subs, list):
+        for i in range(len(subs) - 1, -1, -1):
+            s = subs[i]
+            if not isinstance(s, dict):
+                continue
+            ans = s.get("answers")
+            if isinstance(ans, dict):
+                for kk, vv in ans.items():
+                    merged_answers[str(kk)] = _unwrap_answer_leaf(vv)
+                break
+    ctx["answers"] = merged_answers
+    for kk, vv in merged_answers.items():
+        ctx[f"answers.{kk}"] = vv
+    return ctx
+
+
+def _evaluate_notification_trigger_condition(cfg: dict[str, Any], doc: dict) -> bool:
+    tc = cfg.get("triggerCondition")
+    if not isinstance(tc, dict):
+        return True
+    vp = str(tc.get("valuePath") or "").strip()
+    if not vp:
+        return True
+    mv_needle = str(tc.get("matchValue") or "").strip()
+    merged = _notification_condition_context(doc)
+    got = _lookup_legacy_path(merged, vp)
+    if got is None:
+        trig = merged.get("trigger")
+        got = _lookup_legacy_path(trig, vp) if isinstance(trig, dict) else None
+    if got is None and vp.startswith("trigger."):
+        got = _lookup_legacy_path(merged, vp[len("trigger.") :])
+    if (
+        got is None
+        and vp.startswith("answers.")
+        and isinstance(merged.get("answers"), dict)
+    ):
+        rest = vp[len("answers.") :]
+        ans = merged.get("answers") or {}
+        got = ans.get(rest) if isinstance(ans, dict) else None
+
+    lhs = ""
+    if got is None:
+        lhs = ""
+    elif isinstance(got, (dict, list)):
+        lhs = ""
+    else:
+        lhs = str(got).strip()
+    rhs = mv_needle
+    return lhs == rhs
+
+
+def _generic_list_row_raw_target(row: dict, *, list_id: str, row_idx: int) -> dict:
+    """Infer email/tel/whatsapp from generic_lists row columns (nome de campo livre)."""
+    raw_email = ""
+    raw_phone = ""
+    raw_wp = ""
+    label_name = ""
+    for k, raw_v in row.items():
+        lk = str(k).lower().strip()
+        sval = str(raw_v or "").strip()
+        if not sval:
+            continue
+        if "nome" in lk or lk in ("name", "label"):
+            label_name = label_name or sval
+        elif "whatsapp" in lk:
+            raw_wp = raw_wp or sval
+        elif "email" in lk or lk in ("mail", "correio", "e-mail", "e_mail"):
+            raw_email = raw_email or sval
+        elif any(x in lk for x in ("tel", "phone", "fone", "cel", "mobile")):
+            raw_phone = raw_phone or sval
+        else:
+            if "@" in sval:
+                raw_email = raw_email or sval
+
+    return {
+        "target_id": f"list-{list_id}-{row_idx}",
+        "name": label_name or f"Contato lista {list_id}",
+        "email": raw_email,
+        "phone": raw_phone,
+        "whatsapp": raw_wp,
+        "source": "tenant_list",
+    }
+
+
+def _resolve_flow_notification_recipients(tenant_database: str, cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    refs_u = cfg.get("recipientUserRefs")
+    refs_t = cfg.get("recipientTeamRefs")
+    refs_l = cfg.get("recipientListRefs")
+
+    seen_user: set[str] = set()
+
+    if isinstance(refs_u, list):
+        for ref in refs_u:
+            if not isinstance(ref, dict):
+                continue
+            uid = str(ref.get("id") or "").strip()
+            if not uid or uid in seen_user:
+                continue
+            seen_user.add(uid)
+            try:
+                u = user_service.get_user_by_id(tenant_database, uid)
+            except ValueError:
+                continue
+            out.append(
+                {
+                    "target_id": f"user-{uid}",
+                    "name": str(u.get("name") or u.get("username") or ""),
+                    "email": u.get("email"),
+                    "phone": u.get("phone"),
+                    "whatsapp": u.get("phone"),
+                    "source": "user_ref",
+                },
+            )
+
+    if isinstance(refs_t, list):
+        for ref in refs_t:
+            if not isinstance(ref, dict):
+                continue
+            tid = str(ref.get("id") or "").strip()
+            if not tid:
+                continue
+            try:
+                team = team_service.get_team_by_id(tenant_database, tid)
+            except ValueError:
+                continue
+            for mid in team.get("member_user_ids") or []:
+                su = str(mid).strip()
+                if not su or su in seen_user:
+                    continue
+                seen_user.add(su)
+                try:
+                    u = user_service.get_user_by_id(tenant_database, su)
+                except ValueError:
+                    continue
+                out.append(
+                    {
+                        "target_id": f"user-{su}",
+                        "name": str(u.get("name") or u.get("username") or ""),
+                        "email": u.get("email"),
+                        "phone": u.get("phone"),
+                        "whatsapp": u.get("phone"),
+                        "source": "team_member",
+                    },
+                )
+
+    if isinstance(refs_l, list):
+        for ref in refs_l:
+            if not isinstance(ref, dict):
+                continue
+            lid = str(ref.get("id") or "").strip()
+            if not lid:
+                continue
+            try:
+                gl = tenant_list_service.get_generic_list_by_id(tenant_database, lid)
+            except ValueError:
+                continue
+            items = gl.get("items") or []
+            if not isinstance(items, list):
+                continue
+            for ix, row in enumerate(items):
+                if not isinstance(row, dict):
+                    continue
+                cand = normalize_resolved_manual_targets(
+                    [_generic_list_row_raw_target(row, list_id=lid, row_idx=ix)],
+                )
+                out.extend([x for x in cand if isinstance(x, dict)])
+
+    return normalize_resolved_manual_targets(out)
+
+
 def _actor_matches_block_auth(
     tenant_database: str,
     actor: dict,
@@ -189,6 +393,14 @@ def _create_occurrence_if_needed(db, oid: ObjectId, now) -> ObjectId | None:
     return occ_id
 
 
+def _target_id_to_recipient_user_id(target_id_str: str) -> str | None:
+    t = str(target_id_str or "").strip()
+    if t.startswith("user-"):
+        rest = t[5:].strip()
+        return rest or None
+    return None
+
+
 def _run_notification_step(
     tenant_database: str,
     db,
@@ -199,7 +411,7 @@ def _run_notification_step(
     order: int,
     acting_user: dict | None,
 ) -> dict[str, Any]:
-    """Persist per-recipient log rows + summary event. Returns event dict."""
+    """Dispatch notifications + persist logs; skipped when triggerCondition is false."""
     now = now_brasilia()
     cfg = _node_cfg(doc, node_id)
     template_ref = cfg.get("templateRef") if isinstance(cfg.get("templateRef"), dict) else {}
@@ -209,65 +421,91 @@ def _run_notification_step(
     if isinstance(snap, dict):
         template_name = str(snap.get("name") or "").strip()
 
+    if not _evaluate_notification_trigger_condition(cfg, doc):
+        return {
+            "type": "notification_skipped",
+            "reason": "trigger_condition",
+            "at": now,
+            "node_id": node_id,
+            "order": order,
+            "template": {"id": template_id, "name": template_name},
+            "acting_user": _user_snapshot(acting_user),
+        }
+
+    if not template_id:
+        raise ValueError("Notification step has no templateRef.id")
+
+    tmpl_live = get_notification_template_by_id(tenant_database, template_id)
+
     channels = [
         str(c).strip().lower()
         for c in (cfg.get("channels") or [])
         if str(c).strip()
     ]
-    recipient_refs = cfg.get("recipientUserRefs")
-    if not isinstance(recipient_refs, list):
-        recipient_refs = []
+    if not channels:
+        channels = [
+            str(c).strip().lower()
+            for c in (tmpl_live.get("channels") or [])
+            if str(c).strip().lower()
+        ]
+
+    recipients = _resolve_flow_notification_recipients(tenant_database, cfg)
+    if not recipients:
+        raise ValueError(
+            "No recipients resolved for notification (users, teams, or list contacts with email/phone)",
+        )
+
+    dispatch_result = dispatch_template_for_manual_targets_only(
+        tenant_database,
+        template_id,
+        channels,
+        recipients,
+        preview_title=None,
+        insert_dispatch_test_log=False,
+    )
+
+    display_name = str(tmpl_live.get("name") or template_name or "").strip()
 
     notification_ids: list[str] = []
-    deliveries: list[dict[str, Any]] = []
-
-    for ref in recipient_refs:
-        if not isinstance(ref, dict):
+    delivery_out: list[dict[str, Any]] = []
+    for dd in dispatch_result.get("deliveries") or []:
+        if not isinstance(dd, dict):
             continue
-        uid = str(ref.get("id") or "").strip()
-        rname = ""
-        rs = ref.get("snapshot")
-        if isinstance(rs, dict):
-            rname = str(rs.get("name") or "").strip()
-        for ch in channels or ["pwa"]:
-            log_doc = {
-                "flow_instance_id": oid,
-                "node_id": node_id,
-                "step_order": order,
-                "template_id": template_id or None,
-                "template_name": template_name or None,
-                "recipient_user_id": uid or None,
-                "recipient_name": rname or None,
-                "channel": ch,
-                "created_at": now,
-                "acting_user_id": str(acting_user.get("_id")) if acting_user else None,
-            }
-            ins = db[FLOW_NOTIFICATION_LOG_COLLECTION].insert_one(log_doc)
-            nid = str(ins.inserted_id)
-            notification_ids.append(nid)
-            deliveries.append(
-                {
-                    "notification_id": nid,
-                    "recipient_user_id": uid,
-                    "recipient_name": rname,
-                    "channel": ch,
-                    "template_id": template_id,
-                    "template_name": template_name,
-                },
-            )
+        ruid = _target_id_to_recipient_user_id(str(dd.get("target_id") or ""))
+        log_doc = {
+            **dd,
+            "flow_instance_id": oid,
+            "node_id": node_id,
+            "step_order": order,
+            "template_id": template_id,
+            "template_name": display_name or None,
+            "recipient_user_id": ruid,
+            "acting_user_id": str(acting_user.get("_id")) if acting_user else None,
+            "tenant_database": tenant_database,
+        }
+        ins = db[FLOW_NOTIFICATION_LOG_COLLECTION].insert_one(log_doc)
+        nid = str(ins.inserted_id)
+        notification_ids.append(nid)
+        row = _json_safe(dd)
+        row["notification_id"] = nid
+        row["provider_message_id"] = dd.get("provider_message_id")
+        delivery_out.append(row)
 
-    ev = {
+    summary = dispatch_result.get("summary") or {"sent": 0, "failed": 0, "ignored": 0}
+    eff_ch = dispatch_result.get("channels") or []
+
+    return {
         "type": "notification_executed",
         "at": now,
         "node_id": node_id,
         "order": order,
         "notification_ids": notification_ids,
-        "template": {"id": template_id, "name": template_name},
-        "channels": channels,
-        "deliveries": deliveries,
+        "template": {"id": template_id, "name": display_name or template_name},
+        "channels": eff_ch,
+        "summary": summary,
+        "deliveries": delivery_out,
         "acting_user": _user_snapshot(acting_user),
     }
-    return ev
 
 
 def _normalize_trigger_answers(raw: Any) -> dict[str, Any]:
@@ -314,18 +552,6 @@ def _gateway_match_form_rule(rule: dict, answers: dict[str, Any]) -> bool:
     if op == "lt":
         return left < right
     return False
-
-
-def _lookup_legacy_path(ctx: dict[str, Any], path: str) -> Any:
-    cur: Any = ctx
-    for part in path.split("."):
-        p = part.strip()
-        if not p:
-            continue
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(p)
-    return cur
 
 
 def _gateway_resolve_target_branch(
