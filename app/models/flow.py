@@ -1,7 +1,7 @@
 # app/models/flow.py
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices
 
 
 class FlowGraphPayload(BaseModel):
@@ -22,6 +22,11 @@ class FlowUpdate(BaseModel):
     status: Optional[str] = None
     is_active: Optional[bool] = None
     is_main: Optional[bool] = None
+    #: Preview na Home/runtime: usar versão publicada existente; `null` remove override.
+    home_runtime_version: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("home_runtime_version", "homeRuntimeVersion"),
+    )
 
 
 class FlowVersionSave(BaseModel):

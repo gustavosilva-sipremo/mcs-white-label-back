@@ -52,6 +52,9 @@ def serialize_flow(doc: dict) -> dict:
         out["is_active"] = True
     if "is_main" not in out:
         out["is_main"] = False
+    hrv = out.pop("home_runtime_version", None)
+    if isinstance(hrv, (int, float)) and float(hrv).is_integer():
+        out["home_runtime_version"] = int(hrv)
     return out
 
 
@@ -197,7 +200,7 @@ def get_flow_with_current(tenant_database: str, flow_id: str) -> dict:
 
 
 def get_main_flow_current_plan(tenant_database: str) -> dict[str, Any]:
-    """Main active flow + current version execution_plan (for Home / runtime)."""
+    """Main active flow + execution_plan para Home/runtime (opcionalmente versão antiga)."""
     db = get_tenant_db(tenant_database)
     flow = db[FLOWS_COLLECTION].find_one(
         {
@@ -208,16 +211,37 @@ def get_main_flow_current_plan(tenant_database: str) -> dict[str, Any]:
     if not flow:
         raise ValueError("No main flow found for this tenant")
     foid = flow["_id"]
-    cur_ver = int(flow.get("current_version") or 1)
-    vdoc = db[VERSIONS_COLLECTION].find_one(
-        {"flow_id": foid, "version": cur_ver, "is_current": True},
-    )
+    published_ver = int(flow.get("current_version") or 1)
+
+    hr_raw = flow.get("home_runtime_version")
+    hr_ver: int | None = None
+    if isinstance(hr_raw, (int, float)) and float(hr_raw).is_integer():
+        hr_candidate = int(hr_raw)
+        if hr_candidate >= 1:
+            hr_ver = hr_candidate
+
+    vdoc = None
+
+    if hr_ver is not None:
+        v_override = db[VERSIONS_COLLECTION].find_one(
+            {"flow_id": foid, "version": hr_ver},
+        )
+        if v_override:
+            vdoc = v_override
+
+    if vdoc is None:
+        vdoc = db[VERSIONS_COLLECTION].find_one(
+            {"flow_id": foid, "version": published_ver, "is_current": True},
+        )
     if not vdoc:
         vdoc = db[VERSIONS_COLLECTION].find_one(
             {"flow_id": foid, "is_current": True},
         )
     if not vdoc:
         raise ValueError("Current flow version not found")
+
+    eff_ver = int(vdoc.get("version") or published_ver or 1)
+    runtime_version_is_override = eff_ver != published_ver
     exec_plan = vdoc.get("execution_plan")
     if not isinstance(exec_plan, dict):
         exec_plan = {}
@@ -231,7 +255,11 @@ def get_main_flow_current_plan(tenant_database: str) -> dict[str, Any]:
         "tenant": tenant_database,
         "flow_id": str(flow["_id"]),
         "flow_name": str(flow.get("name") or ""),
-        "current_version": cur_ver,
+        "published_version": published_ver,
+        "runtime_version": eff_ver,
+        "runtime_version_is_override": runtime_version_is_override,
+        # Compatível: versão efetiva do snapshot servido (= runtime_version)
+        "current_version": eff_ver,
         "execution_plan": exec_plan,
         "triggers_index": triggers_full,
         "triggers_meta": exec_plan.get("entryBranches") or [],
@@ -393,6 +421,9 @@ def update_flow(tenant_database: str, flow_id: str, data: dict) -> dict:
     for f in ["_id", "created_at", "current_version"]:
         data.pop(f, None)
 
+    home_runtime_provided = "home_runtime_version" in data
+    home_runtime_payload = data.pop("home_runtime_version") if home_runtime_provided else None
+
     if "name" in data and data["name"] is not None:
         data["name"] = str(data["name"]).strip()
         if not data["name"]:
@@ -421,11 +452,51 @@ def update_flow(tenant_database: str, flow_id: str, data: dict) -> dict:
                 {"$set": {"is_main": False, "updated_at": now}},
             )
 
-    if not data:
+    unset_home_runtime = False
+    will_deactivate = "is_active" in data and data["is_active"] is False
+    losing_main = "is_main" in data and data["is_main"] is False
+
+    if home_runtime_provided and not will_deactivate:
+        if not current.get("is_main"):
+            raise ValueError("home_runtime_version only applies to the main flow")
+        if home_runtime_payload is None:
+            unset_home_runtime = True
+        else:
+            try:
+                hrv = int(home_runtime_payload)
+            except (TypeError, ValueError) as e:
+                raise ValueError("home_runtime_version must be an integer") from e
+            if hrv < 1:
+                raise ValueError("home_runtime_version must be >= 1")
+            v_ok = db[VERSIONS_COLLECTION].find_one({"flow_id": oid, "version": hrv})
+            if not v_ok:
+                raise ValueError("Flow version not found")
+            data["home_runtime_version"] = hrv
+
+    if losing_main:
+        unset_home_runtime = True
+        data.pop("home_runtime_version", None)
+
+    if will_deactivate:
+        unset_home_runtime = True
+        data.pop("home_runtime_version", None)
+
+    if not data and not unset_home_runtime:
         raise ValueError("No fields provided for update")
 
-    data["updated_at"] = now_brasilia()
-    res = db[FLOWS_COLLECTION].update_one({"_id": oid}, {"$set": data})
+    now = now_brasilia()
+    if data:
+        data["updated_at"] = now
+
+    update_ops: dict[str, Any] = {}
+    if data:
+        update_ops["$set"] = data
+    if unset_home_runtime:
+        update_ops.setdefault("$unset", {})["home_runtime_version"] = ""
+    if unset_home_runtime and not data:
+        update_ops["$set"] = {"updated_at": now}
+
+    res = db[FLOWS_COLLECTION].update_one({"_id": oid}, update_ops)
     if res.matched_count == 0:
         raise ValueError("Flow not found")
 
