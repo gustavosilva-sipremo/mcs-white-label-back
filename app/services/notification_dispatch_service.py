@@ -13,6 +13,22 @@ from app.utils.datetime_utils import now_brasilia
 
 DISPATCH_LOG_COLLECTION = "notification_test_dispatch_logs"
 SUPPORTED_CHANNELS = ("email", "sms", "whatsapp", "pwa")
+ANSI_RESET = "\033[0m"
+ANSI_BLUE = "\033[94m"
+ANSI_GREEN = "\033[92m"
+ANSI_YELLOW = "\033[93m"
+ANSI_RED = "\033[91m"
+
+
+def _log_dispatch(message: str, level: str = "info") -> None:
+    color = ANSI_BLUE
+    if level == "success":
+        color = ANSI_GREEN
+    elif level == "warn":
+        color = ANSI_YELLOW
+    elif level == "error":
+        color = ANSI_RED
+    print(f"{color}[dispatch]{ANSI_RESET} {message}")
 
 
 def _normalize_email(value: str | None) -> str:
@@ -116,6 +132,9 @@ def dispatch_template_test(
     brand_primary_foreground: str | None = None,
     logo_url: str | None = None,
 ) -> dict[str, Any]:
+    _log_dispatch(
+        f"start tenant={tenant_database} template={template_id} channels={channels}",
+    )
     template = get_notification_template_by_id(tenant_database, template_id)
     enabled_template_channels = [
         str(c).strip().lower() for c in (template.get("channels") or []) if str(c).strip().lower() in SUPPORTED_CHANNELS
@@ -125,13 +144,22 @@ def dispatch_template_test(
     ]
     effective_channels = [c for c in requested_channels if c in enabled_template_channels]
     if not effective_channels:
+        _log_dispatch("no effective channels for this template", "warn")
         raise ValueError("No valid channels selected for this template")
 
     targets = _build_targets(current_user, use_logged_user, manual_targets or [])
     if not targets:
+        _log_dispatch("no valid targets provided", "warn")
         raise ValueError("No valid targets provided")
 
+    _log_dispatch(
+        f"targets={len(targets)} effective_channels={effective_channels}",
+    )
+
     merged_channel_templates = channel_templates or template.get("channel_templates") or {}
+    if logo_url:
+        logo_kind = "data-uri" if str(logo_url).startswith("data:image/") else "url"
+        _log_dispatch(f"email logo provided ({logo_kind})")
     rendered = preview_notification_templates(
         channels=effective_channels,
         channel_templates=merged_channel_templates,
@@ -153,6 +181,21 @@ def dispatch_template_test(
             )
             status = str(channel_result.get("status") or "failed")
             summary[status] = summary.get(status, 0) + 1
+            if status == "sent":
+                _log_dispatch(
+                    f"{channel} -> {target['name']} status=sent provider_id={channel_result.get('provider_message_id') or '-'}",
+                    "success",
+                )
+            elif status == "ignored":
+                _log_dispatch(
+                    f"{channel} -> {target['name']} status=ignored reason={channel_result.get('error')}",
+                    "warn",
+                )
+            else:
+                _log_dispatch(
+                    f"{channel} -> {target['name']} status=failed error={channel_result.get('error')}",
+                    "error",
+                )
             delivery_logs.append(
                 {
                     "channel": channel,
@@ -183,6 +226,10 @@ def dispatch_template_test(
         "created_at": now_brasilia(),
     }
     insert_result = db[DISPATCH_LOG_COLLECTION].insert_one(payload)
+    _log_dispatch(
+        f"finished dispatch_id={insert_result.inserted_id} summary={summary}",
+        "success" if summary.get("failed", 0) == 0 else "warn",
+    )
 
     return {
         "dispatch_id": str(insert_result.inserted_id),
