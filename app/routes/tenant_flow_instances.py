@@ -22,6 +22,67 @@ async def list_flow_instances_route(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@router.get("/notifications/inbox")
+async def list_notifications_inbox_route(
+    tenant_database: str,
+    limit: int = 30,
+    user=Depends(require_user_same_tenant),
+):
+    try:
+        items = flow_instance_service.list_user_notification_inbox(
+            tenant_database,
+            actor=user,
+            limit=limit,
+        )
+        return {"tenant": tenant_database, "items": items}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.patch("/notifications/{notification_id}/read")
+async def mark_notification_read_route(
+    tenant_database: str,
+    notification_id: str,
+    user=Depends(require_user_same_tenant),
+):
+    try:
+        item = flow_instance_service.mark_user_notification_inbox_read(
+            tenant_database,
+            notification_id,
+            actor=user,
+        )
+        return {"tenant": tenant_database, "item": item}
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.delete("/notifications/{notification_id}")
+async def delete_notification_route(
+    tenant_database: str,
+    notification_id: str,
+    user=Depends(require_user_same_tenant),
+):
+    try:
+        item = flow_instance_service.delete_user_notification_inbox_item(
+            tenant_database,
+            notification_id,
+            actor=user,
+        )
+        return {"tenant": tenant_database, "item": item}
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @router.post("")
 async def create_flow_instance_route(
     tenant_database: str,

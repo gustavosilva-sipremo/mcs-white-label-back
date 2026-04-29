@@ -15,11 +15,15 @@ from app.services.notification_dispatch_service import (
     dispatch_template_for_manual_targets_only,
     normalize_resolved_manual_targets,
 )
-from app.services.notification_template_service import get_notification_template_by_id
+from app.services.notification_template_service import (
+    get_notification_template_by_id,
+    preview_notification_templates,
+)
 
 FLOW_INSTANCES_COLLECTION = "flow_instances"
 FLOW_OCCURRENCES_COLLECTION = "flow_occurrences"
 FLOW_NOTIFICATION_LOG_COLLECTION = "flow_instance_notification_logs"
+FLOW_USER_NOTIFICATION_INBOX_COLLECTION = "flow_user_notification_inbox"
 
 
 def _validate_object_id(sid: str) -> ObjectId:
@@ -401,6 +405,64 @@ def _target_id_to_recipient_user_id(target_id_str: str) -> str | None:
     return None
 
 
+def _extract_pwa_preview_payload(
+    *,
+    template: dict[str, Any],
+    channels: list[str],
+) -> dict[str, str] | None:
+    lower_channels = {str(ch).strip().lower() for ch in channels if str(ch).strip()}
+    if "pwa" not in lower_channels:
+        return None
+    tpl_channels = [ch for ch in lower_channels if ch in ("email", "sms", "whatsapp", "pwa")]
+    try:
+        bundle = preview_notification_templates(
+            channels=tpl_channels or ["pwa"],
+            channel_templates=template.get("channel_templates") or {},
+            preview_title=str(template.get("name") or "Notificação"),
+        )
+    except Exception:
+        return None
+    pwa = bundle.get("pwa")
+    if not isinstance(pwa, dict):
+        return None
+    title = str(pwa.get("title") or template.get("name") or "Notificação").strip()
+    body = str(pwa.get("body") or "").strip()
+    if not title and not body:
+        return None
+    return {"title": title or "Notificação", "body": body}
+
+
+def _create_user_notification_inbox_item(
+    db,
+    *,
+    tenant_database: str,
+    flow_instance_id: ObjectId,
+    notification_ids: list[str],
+    template_id: str,
+    template_name: str,
+    channels: list[str],
+    pwa_preview: dict[str, str] | None,
+    created_at: datetime,
+) -> str | None:
+    if not pwa_preview:
+        return None
+    inbox_doc = {
+        "tenant_database": tenant_database,
+        "flow_instance_id": flow_instance_id,
+        "notification_ids": notification_ids,
+        "template_id": template_id,
+        "template_name": template_name,
+        "channels": channels,
+        "pwa_title": str(pwa_preview.get("title") or "Notificação"),
+        "pwa_body": str(pwa_preview.get("body") or ""),
+        "read_by": {},
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    ins = db[FLOW_USER_NOTIFICATION_INBOX_COLLECTION].insert_one(inbox_doc)
+    return str(ins.inserted_id)
+
+
 def _run_notification_step(
     tenant_database: str,
     db,
@@ -465,6 +527,7 @@ def _run_notification_step(
     )
 
     display_name = str(tmpl_live.get("name") or template_name or "").strip()
+    pwa_preview = _extract_pwa_preview_payload(template=tmpl_live, channels=channels)
 
     notification_ids: list[str] = []
     delivery_out: list[dict[str, Any]] = []
@@ -493,6 +556,17 @@ def _run_notification_step(
 
     summary = dispatch_result.get("summary") or {"sent": 0, "failed": 0, "ignored": 0}
     eff_ch = dispatch_result.get("channels") or []
+    inbox_id = _create_user_notification_inbox_item(
+        db,
+        tenant_database=tenant_database,
+        flow_instance_id=oid,
+        notification_ids=notification_ids,
+        template_id=template_id,
+        template_name=(display_name or template_name),
+        channels=eff_ch,
+        pwa_preview=pwa_preview,
+        created_at=now,
+    )
 
     return {
         "type": "notification_executed",
@@ -504,8 +578,112 @@ def _run_notification_step(
         "channels": eff_ch,
         "summary": summary,
         "deliveries": delivery_out,
+        "pwa": pwa_preview,
+        "inbox_notification_id": inbox_id,
         "acting_user": _user_snapshot(acting_user),
     }
+
+
+def list_user_notification_inbox(
+    tenant_database: str,
+    *,
+    actor: dict | None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    if not actor:
+        raise ValueError("Authenticated user required")
+    uid = str(actor.get("_id") or "").strip()
+    if not uid:
+        raise ValueError("Authenticated user required")
+    db = get_tenant_db(tenant_database)
+    cur = (
+        db[FLOW_USER_NOTIFICATION_INBOX_COLLECTION]
+        .find({})
+        .sort("created_at", -1)
+        .limit(max(1, min(limit, 100)))
+    )
+    out: list[dict[str, Any]] = []
+    for doc in cur:
+        deleted_by = doc.get("deleted_by")
+        if isinstance(deleted_by, dict) and deleted_by.get(uid):
+            continue
+        read_by = doc.get("read_by")
+        read_at = None
+        if isinstance(read_by, dict):
+            read_at = read_by.get(uid)
+        created_at = doc.get("created_at")
+        if not isinstance(created_at, datetime):
+            created_at = now_brasilia()
+        out.append(
+            {
+                "id": str(doc.get("_id")),
+                "flow_instance_id": str(doc.get("flow_instance_id") or ""),
+                "notification_ids": [
+                    str(x) for x in (doc.get("notification_ids") or []) if str(x).strip()
+                ],
+                "template_id": str(doc.get("template_id") or ""),
+                "template_name": str(doc.get("template_name") or ""),
+                "channels": [
+                    str(ch).strip().lower()
+                    for ch in (doc.get("channels") or [])
+                    if str(ch).strip()
+                ],
+                "pwa": {
+                    "title": str(doc.get("pwa_title") or "Notificação"),
+                    "body": str(doc.get("pwa_body") or ""),
+                },
+                "is_read": bool(read_at),
+                "read_at": _json_safe(read_at) if read_at else None,
+                "created_at": _json_safe(created_at),
+            },
+        )
+    return out
+
+
+def mark_user_notification_inbox_read(
+    tenant_database: str,
+    notification_id: str,
+    *,
+    actor: dict | None,
+) -> dict[str, Any]:
+    if not actor:
+        raise ValueError("Authenticated user required")
+    uid = str(actor.get("_id") or "").strip()
+    if not uid:
+        raise ValueError("Authenticated user required")
+    oid = _validate_object_id(notification_id)
+    db = get_tenant_db(tenant_database)
+    now = now_brasilia()
+    upd = db[FLOW_USER_NOTIFICATION_INBOX_COLLECTION].update_one(
+        {"_id": oid},
+        {"$set": {f"read_by.{uid}": now, "updated_at": now}},
+    )
+    if upd.matched_count == 0:
+        raise ValueError("Notification inbox item not found")
+    return {"id": str(oid), "is_read": True, "read_at": _json_safe(now)}
+
+
+def delete_user_notification_inbox_item(
+    tenant_database: str,
+    notification_id: str,
+    *,
+    actor: dict | None,
+) -> dict[str, Any]:
+    if not actor:
+        raise ValueError("Authenticated user required")
+    uid = str(actor.get("_id") or "").strip()
+    if not uid:
+        raise ValueError("Authenticated user required")
+    oid = _validate_object_id(notification_id)
+    db = get_tenant_db(tenant_database)
+    now = now_brasilia()
+    upd = db[FLOW_USER_NOTIFICATION_INBOX_COLLECTION].update_one(
+        {"_id": oid},
+        {"$set": {f"deleted_by.{uid}": now, "updated_at": now}},
+    )
+    if upd.matched_count == 0:
+        raise ValueError("Notification inbox item not found")
+    return {"id": str(oid), "deleted": True, "deleted_at": _json_safe(now)}
 
 
 def _normalize_trigger_answers(raw: Any) -> dict[str, Any]:
